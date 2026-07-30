@@ -1,14 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { PacketHelper } from './packet.helper';
-import {
-  Gt06Protocol,
-} from '../types/gt06.enum';
+import { GT06_START_BYTE_1, GT06_START_BYTE_2 } from '../common/constants';
 import type {
-  LoginPacket,
   GpsPacket,
+  LoginPacket,
   ParsedPacket,
 } from '../interfaces/gt06-packet.interface';
-import { GT06_START_BYTE_1, GT06_START_BYTE_2 } from '../common/constants';
+import { PacketHelper } from './packet.helper';
 
 @Injectable()
 export class Gt06Parser {
