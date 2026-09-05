@@ -1,16 +1,28 @@
+import 'reflect-metadata';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { appConfig } from './config/app.config';
 
-async function bootstrap() {
+async function bootstrap(): Promise<void> {
+  const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
-  app.enableCors();
+  app.enableCors({ origin: appConfig.cors.origin });
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
 
   await app.listen(appConfig.rest.port);
 
-  console.log(`REST API running on http://localhost:${appConfig.rest.port}`);
-  console.log(`Socket.IO ready on port ${appConfig.socket.port}`);
+  const { publicHost, port: tcpPort } = appConfig.tcp;
+  logger.log(`REST API      http://${publicHost}:${appConfig.rest.port}`);
+  logger.log(`Socket.IO     http://${publicHost}:${appConfig.socket.port}`);
+  logger.log(`GT06 devices  ${publicHost}:${tcpPort}`);
 }
 
-bootstrap();
+void bootstrap();

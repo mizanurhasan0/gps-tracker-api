@@ -1,13 +1,46 @@
-import { TCP_PORT, SOCKET_PORT, REST_API_PORT } from '../common/constants';
+import * as path from 'path';
+
+function readNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readString(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function readList(value: string | undefined): string[] {
+  return readString(value, '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+}
 
 export const appConfig = {
-  tcp: {
-    port: TCP_PORT,
+  rest: {
+    port: readNumber(process.env.REST_PORT, 3000),
   },
   socket: {
-    port: SOCKET_PORT,
+    port: readNumber(process.env.SOCKET_PORT, 3001),
   },
-  rest: {
-    port: REST_API_PORT,
+  tcp: {
+    host: readString(process.env.TCP_HOST, '0.0.0.0'),
+    port: readNumber(process.env.TCP_PORT, 5023),
+    publicHost: readString(process.env.PUBLIC_HOST, '127.0.0.1'),
   },
-};
+  cors: {
+    origin: readString(process.env.CORS_ORIGIN, '*'),
+  },
+  devices: {
+    /** A device is considered online if seen within this window */
+    onlineThresholdMs: readNumber(process.env.ONLINE_THRESHOLD_MS, 180_000),
+    /** Empty list accepts any IMEI */
+    allowedImeis: readList(process.env.ALLOWED_IMEIS),
+  },
+  storage: {
+    dataDir: readString(process.env.DATA_DIR, path.join(process.cwd(), 'data')),
+  },
+} as const;
+
+export type AppConfig = typeof appConfig;

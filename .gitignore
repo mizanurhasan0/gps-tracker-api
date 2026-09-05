@@ -28,5 +28,8 @@ coverage/
 .cache/
 .nyc_output/
 
+# Runtime GPS persistence (server-local)
+data/
+
 # TypeScript
 *.tsbuildinfo
