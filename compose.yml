@@ -1,0 +1,63 @@
+name: gps-tracker-unified
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: postgresql://gps_tracker:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}@postgres:5432/gps_tracker
+      REST_PORT: 3000
+      SOCKET_PORT: 3001
+      TCP_HOST: 0.0.0.0
+      TCP_PORT: 5023
+      PUBLIC_HOST: ${PUBLIC_HOST:-127.0.0.1}
+      ALLOWED_IMEIS: ${ALLOWED_IMEIS:-}
+      ONLINE_THRESHOLD_MS: ${ONLINE_THRESHOLD_MS:-180000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      GPS_TIMEZONE_OFFSET_MINUTES: ${GPS_TIMEZONE_OFFSET_MINUTES:-0}
+      ADMIN_PHONE: ${ADMIN_PHONE:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    ports:
+      - "${REST_PORT:-3000}:3000"
+      - "${SOCKET_PORT:-3001}:3001"
+      - "${TCP_PORT:-5023}:5023"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docs/postgres-init.sql:/docker-entrypoint-initdb.d/10-app-user.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$APP_DB_PASSWORD\" psql -h 127.0.0.1 -U gps_tracker -d gps_tracker -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres-data:

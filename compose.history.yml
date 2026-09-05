@@ -1,22 +1,25 @@
-# Local development PostgreSQL. Set POSTGRES_PASSWORD before starting.
-# Production must use a dedicated non-superuser application role; see docs.
+# PostgreSQL-only local setup; includes business data as well as history.
+# A separate project name prevents accidental reuse of full-stack/legacy volumes.
+name: gps-tracker-local
 services:
-  history-db:
-    image: postgres:17-alpine
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: gps_history
-      POSTGRES_DB: gps_history
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your environment}
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
     ports:
-      - "127.0.0.1:${HISTORY_DB_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - gps-history-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
+      - ./docs/postgres-init.sql:/docker-entrypoint-initdb.d/10-app-user.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gps_history -d gps_history"]
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$APP_DB_PASSWORD\" psql -h 127.0.0.1 -U gps_tracker -d gps_tracker -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
     logging:
       driver: json-file
       options:
@@ -24,4 +27,4 @@ services:
         max-file: "3"
 
 volumes:
-  gps-history-data:
+  postgres-data:

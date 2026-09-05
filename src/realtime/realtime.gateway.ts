@@ -16,25 +16,25 @@ export class RealtimeGateway implements OnGatewayInit {
   @WebSocketServer() private server?: Server;
   constructor(
     private readonly auth: AuthService,
-    private readonly access: AccessService,
+    private readonly access: AccessService
   ) {}
   afterInit(server: Server): void {
-    server.use((client, next) => {
+    server.use(async (client, next) => {
       try {
-        this.auth.authenticate(client.handshake.auth.token);
+        await this.auth.authenticate(client.handshake.auth.token);
         next();
       } catch {
         next(new Error('Unauthorized'));
       }
     });
   }
-  publishLocation(location: DeviceLocation): void {
+  async publishLocation(location: DeviceLocation): Promise<void> {
     // Recheck each delivery: stopped subscriptions, logout and expired sessions
     // lose access immediately, including on already-connected sockets.
     for (const client of this.server?.sockets.sockets.values() ?? []) {
       try {
-        const user = this.auth.authenticate(client.handshake.auth.token);
-        if (this.access.canTrack(user, location.imei))
+        const user = await this.auth.authenticate(client.handshake.auth.token);
+        if (await this.access.canTrack(user, location.imei))
           client.emit(LOCATION_UPDATE_EVENT, location);
       } catch {
         client.disconnect(true);

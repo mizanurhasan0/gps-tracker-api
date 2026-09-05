@@ -32,9 +32,9 @@ export class PaymentsController {
   account(
     @Req() req: AuthRequest,
     @Param('method') method: string,
-    @Body() input: PaymentAccountDto,
+    @Body() input: PaymentAccountDto
   ) {
-    this.payments.setAccount(req.user, method, input);
+    return this.payments.setAccount(req.user, method, input);
   }
   @Get('payments/monthly')
   monthly(@Req() req: AuthRequest, @Query() query: MonthlyQueryDto) {
@@ -58,7 +58,7 @@ export class PaymentsController {
   review(
     @Req() req: AuthRequest,
     @Param('id') id: string,
-    @Body() input: DecisionDto,
+    @Body() input: DecisionDto
   ) {
     return this.payments.review(req.user, id, input);
   }

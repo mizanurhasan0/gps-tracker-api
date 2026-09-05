@@ -26,6 +26,6 @@ export class AuthController {
   @Post('logout')
   @HttpCode(204)
   logout(@Req() req: AuthRequest) {
-    this.auth.logout(req.headers.authorization!.replace(/^Bearer /, ''));
+    return this.auth.logout(req.headers.authorization!.replace(/^Bearer /, ''));
   }
 }

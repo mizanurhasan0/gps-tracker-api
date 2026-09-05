@@ -18,15 +18,15 @@ export class Gt06Server implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly locations: LocationsService,
-    private readonly realtime: RealtimeGateway,
+    private readonly realtime: RealtimeGateway
   ) {}
 
   onModuleInit(): void {
     const { host, port, publicHost } = appConfig.tcp;
 
-    this.server = createServer(socket => this.handleSocket(socket));
+    this.server = createServer((socket) => this.handleSocket(socket));
 
-    this.server.on('error', error => {
+    this.server.on('error', (error) => {
       this.logger.error(`TCP server error: ${error.message}`);
     });
 
@@ -50,22 +50,22 @@ export class Gt06Server implements OnModuleInit, OnModuleDestroy {
     const connection = new Gt06Connection(
       socket,
       this.locations,
-      this.realtime,
+      this.realtime
     );
 
     this.logger.log(`Device connected: ${connection.deviceLabel}`);
 
-    socket.on('data', chunk => {
+    socket.on('data', (chunk) => {
       try {
         connection.handleData(chunk);
       } catch (error) {
         this.logger.error(
           `Failed handling data from ${connection.deviceLabel}: ${
             (error as Error).message
-          }`,
+          }`
         );
         // No ACK was sent for the failed frame. Reconnect permits device retry;
-        // never keep consuming a stream after durable history enqueue failed.
+        // never keep consuming a stream after the database commit failed.
         socket.destroy();
       }
     });
@@ -73,6 +73,6 @@ export class Gt06Server implements OnModuleInit, OnModuleDestroy {
       this.sockets.delete(socket);
       connection.handleClose();
     });
-    socket.on('error', error => connection.handleError(error));
+    socket.on('error', (error) => connection.handleError(error));
   }
 }

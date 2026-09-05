@@ -10,60 +10,98 @@ import { Vehicle } from './vehicle.types';
 @Injectable()
 export class VehiclesService {
   constructor(private readonly db: DatabaseService) {}
-  findAll(): Vehicle[] {
-    return this.db.all('SELECT * FROM vehicles ORDER BY name');
+  findAll(): Promise<Vehicle[]> {
+    return this.db.all<Vehicle>('SELECT * FROM vehicles ORDER BY name');
   }
-  findOne(id: string): Vehicle {
-    const vehicle = this.db.get<Vehicle>(
-      'SELECT * FROM vehicles WHERE id = ?',
-      id,
+  async findOne(id: string): Promise<Vehicle> {
+    const vehicle = await this.db.get<Vehicle>(
+      'SELECT * FROM vehicles WHERE id = $1',
+      id
     );
     if (!vehicle) throw new NotFoundException('Vehicle not found');
     return vehicle;
   }
-  create(input: CreateVehicleDto): Vehicle {
-    this.assertImeiAvailable(input.imei);
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    this.db.run(
-      'INSERT INTO vehicles VALUES (?,?,?,?,?,?,?,?)',
-      id,
-      input.name.trim(),
-      input.plate.trim(),
-      input.imei,
-      input.driverName?.trim() ?? null,
-      input.driverPhone?.trim() ?? null,
-      now,
-      now,
-    );
-    return this.findOne(id);
+  async create(input: CreateVehicleDto): Promise<Vehicle> {
+    try {
+      return await this.db.transaction(async () => {
+        await this.assertImeiAvailable(input.imei);
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        await this.db.run(
+          `INSERT INTO vehicles (id,name,plate,imei,"driverName","driverPhone","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          id,
+          input.name.trim(),
+          input.plate.trim(),
+          input.imei,
+          input.driverName?.trim() ?? null,
+          input.driverPhone?.trim() ?? null,
+          now,
+          now
+        );
+        return this.findOne(id);
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException('IMEI is already assigned');
+      if ((error as { code?: string }).code === '23503')
+        throw new ConflictException(
+          'This vehicle is assigned to a route and cannot be deleted'
+        );
+      throw error;
+    }
   }
-  update(id: string, input: UpdateVehicleDto): Vehicle {
-    const existing = this.findOne(id);
-    if (input.imei && input.imei !== existing.imei)
-      this.assertImeiAvailable(input.imei);
-    this.db.run(
-      'UPDATE vehicles SET name=?,plate=?,imei=?,driverName=?,driverPhone=?,updatedAt=? WHERE id=?',
-      input.name?.trim() ?? existing.name,
-      input.plate?.trim() ?? existing.plate,
-      input.imei ?? existing.imei,
-      input.driverName?.trim() ?? existing.driverName ?? null,
-      input.driverPhone?.trim() ?? existing.driverPhone ?? null,
-      new Date().toISOString(),
-      id,
-    );
-    return this.findOne(id);
+  async update(id: string, input: UpdateVehicleDto): Promise<Vehicle> {
+    try {
+      return await this.db.transaction(async () => {
+        const existing = await this.findOne(id);
+        if (input.imei && input.imei !== existing.imei)
+          await this.assertImeiAvailable(input.imei);
+        await this.db.run(
+          'UPDATE vehicles SET name=$1,plate=$2,imei=$3,"driverName"=$4,"driverPhone"=$5,"updatedAt"=$6 WHERE id=$7',
+          input.name?.trim() ?? existing.name,
+          input.plate?.trim() ?? existing.plate,
+          input.imei ?? existing.imei,
+          input.driverName?.trim() ?? existing.driverName ?? null,
+          input.driverPhone?.trim() ?? existing.driverPhone ?? null,
+          new Date().toISOString(),
+          id
+        );
+        return this.findOne(id);
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException('IMEI is already assigned');
+      if ((error as { code?: string }).code === '23503')
+        throw new ConflictException(
+          'This vehicle is assigned to a route and cannot be deleted'
+        );
+      throw error;
+    }
   }
-  remove(id: string): void {
-    this.findOne(id);
-    if (this.db.get('SELECT id FROM routes WHERE vehicleId = ?', id))
-      throw new ConflictException(
-        'This vehicle is assigned to a route and cannot be deleted',
-      );
-    this.db.run('DELETE FROM vehicles WHERE id = ?', id);
+  async remove(id: string): Promise<void> {
+    try {
+      return await this.db.transaction(async () => {
+        await this.findOne(id);
+        if (
+          await this.db.get('SELECT id FROM routes WHERE "vehicleId" = $1', id)
+        )
+          throw new ConflictException(
+            'This vehicle is assigned to a route and cannot be deleted'
+          );
+        await this.db.run('DELETE FROM vehicles WHERE id = $1', id);
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException('IMEI is already assigned');
+      if ((error as { code?: string }).code === '23503')
+        throw new ConflictException(
+          'This vehicle is assigned to a route and cannot be deleted'
+        );
+      throw error;
+    }
   }
-  private assertImeiAvailable(imei: string): void {
-    if (this.db.get('SELECT id FROM vehicles WHERE imei = ?', imei))
+  private async assertImeiAvailable(imei: string): Promise<void> {
+    if (await this.db.get('SELECT id FROM vehicles WHERE imei = $1', imei))
       throw new ConflictException('IMEI is already assigned');
   }
 }

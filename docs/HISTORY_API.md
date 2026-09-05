@@ -6,23 +6,16 @@ Existing live-location, vehicle and transport endpoints remain available.
 
 ## Storage and ingestion
 
-`DATABASE_URL` configures a pooled PostgreSQL history database. Versioned schema
-creation runs automatically under a PostgreSQL advisory lock. Business data
-(users, sessions, vehicles, payments and transport) stays in SQLite.
+`DATABASE_URL` configures the shared PostgreSQL database used by every module.
+Schema creation is versioned. Missing configuration or unavailable PostgreSQL
+fails application startup; there is no SQLite/JSON fallback or local outbox.
 
-Every usable coordinate report is synchronously committed to a SQLite outbox
-with `synchronous=FULL` before the TCP handler sends its ACK. Batches retry every
-second and insert into PostgreSQL idempotently. No fire-and-forget database
-writes run in the TCP handler. If local persistence fails, the connection closes
-without acknowledging the failed report, allowing device retry. Retry behavior
-still depends on the physical device. Never delete `transport.sqlite` during an
-upgrade: it contains accepted history that may not yet have reached PostgreSQL.
-
-PostgreSQL failure preserves live tracking and the durable queue. History queries
-return 503 when PostgreSQL cannot be read. Successful queries expose pending
-history through `freshness`. Shutdown waits for the active batch; remaining
-queued records survive restart. No automatic history deletion is configured.
-Monitor queue depth and disk space, especially during a prolonged database outage.
+Usable GPS reports and latest device state are committed to PostgreSQL before
+TCP acknowledgements are sent. Failed persistence closes the connection without
+acknowledging the failed report. Tracker firmware determines whether and when it
+retries; server-side buffering cannot guarantee recovery during an outage.
+History requests return 503 when PostgreSQL is unavailable. No automatic history
+deletion is configured. Monitor PostgreSQL capacity and ingestion errors.
 
 History uses binary GT06 date bytes, the GPS-fix flag, and correct hemisphere
 bits. `GPS_TIMEZONE_OFFSET_MINUTES=0` assumes device UTC; verify it against a real
@@ -58,11 +51,11 @@ Each response includes:
 }
 ```
 
-Freshness is captured conservatively before the PostgreSQL snapshot. `complete`
-means no known valid queued points in this range at that check; it does not claim
-the device reported continuously or that no later/offline uploads will arrive.
-Snapshot IDs exclude later commits from a response. History is append-only and
-all application writers serialize ID allocation/commit with an advisory lock.
+`freshness` retains the existing client response shape. With direct PostgreSQL
+writes, `pendingPoints` is zero, `oldestPendingAt` is null and `complete` is true.
+This describes committed server data, not uninterrupted tracker coverage or the
+absence of later offline uploads. Snapshot IDs exclude later commits from a
+response; history remains append-only.
 
 Point shape:
 
@@ -125,13 +118,11 @@ segments. Daily summaries remain available for selecting a smaller interval.
 
 ```sh
 npm run typecheck
-npm test
-HISTORY_TEST_DATABASE_URL=postgresql://test_user:test_password@127.0.0.1:55432/test_db npm test
+npm run test:unit
+TEST_DATABASE_URL=postgresql://test_user:test_password@127.0.0.1:55432/test_db npm test
 ```
 
-The PostgreSQL test creates and drops its own random schema, so use a dedicated
-test database/user with schema permissions. Without the test URL, that integration
-suite is explicitly skipped; codec, history math and existing HTTP tests still run.
-Coverage includes real PostgreSQL storage, admin/guardian access, retransmission
-deduplication, late points, cursor snapshots, outage queue/restart recovery,
-vehicle reassignment, and a 267,840-point calendar month.
+Full tests require a disposable PostgreSQL database/user with schema permissions.
+They create isolated schemas. Never point tests at the production database.
+Database-free tests cover protocol parsing and history math; integration tests
+exercise database persistence, role checks, route queries and transactions.

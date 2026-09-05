@@ -1,98 +1,189 @@
-# GPS history setup and VPS rollout
+# Unified PostgreSQL setup and rollout
 
-The backend keeps accounts, vehicles and billing in SQLite. GPS history is
-delivered to PostgreSQL through a durable SQLite outbox. Back up both stores.
-This document is a runbook, not evidence that a deployment has been performed.
+All runtime data uses one PostgreSQL database. Docker can run both backend and
+PostgreSQL, so the VPS needs neither a new Node installation nor PM2 for this API.
+Alternatively, run the backend on Node >=22.22.0 with Docker PostgreSQL only.
+This is a runbook, not evidence of a VPS inspection or deployment.
 
-## Local database
+## Check before installing anything
 
-Use Node 24 or newer. From the backend directory, set a local database password
-without writing it into shell history:
+Run these read-only checks on the target host:
 
 ```sh
-read -rs POSTGRES_PASSWORD
-export POSTGRES_PASSWORD
-docker compose -f compose.history.yml up -d --wait
+docker --version
+docker compose version
+docker ps -a
+docker volume ls
+ss -ltn
+node --version
+pm2 list
 ```
 
-Put `DATABASE_URL=postgresql://gps_history:<URL-encoded-password>@127.0.0.1:5432/gps_history`
-in the ignored application `.env`. Use `HISTORY_DB_PORT` to select a different
-local port, and use that port in the URL. Do not print the resolved Compose
-configuration with real credentials. Install dependencies with `npm ci`, then
-run `npm run typecheck`, `npm test`, and `npm run start:prod`.
+Only install missing tools for the chosen deployment mode. Inspect existing
+containers, volumes and ports before provisioning. Do not delete an existing
+PostgreSQL volume or stop another application's database. Full-stack Docker
+needs Docker with Compose; host-run API additionally needs compatible Node/npm.
+Node 24 is not required. Git is needed if downloading the release using Git.
 
-The Compose volume survives ordinary `docker compose down`. Do not use `down -v`
-unless intentionally deleting this development database. Changing the password
-environment variable does not change the password in an existing database.
+## Prepare configuration
 
-The example image initializes a superuser for development. Production should
-have a dedicated non-superuser application role with ownership of only its
-history database/schema and migration objects. Keep the database bound to
-localhost/private networking; use verified TLS for a remote database connection.
+In a separate checkout of the candidate backend:
 
-## Existing VPS prerequisites
+```sh
+cp .env.example .env
+chmod 600 .env
+openssl rand -hex 32
+openssl rand -hex 32
+nano .env
+```
 
-Read-only checks on 2026-09-05 found:
+Put the two different generated values into `POSTGRES_PASSWORD` (administrator)
+and `APP_DB_PASSWORD` (application role). Hex passwords need no URL encoding.
+Set `ADMIN_PHONE`, a unique `ADMIN_PASSWORD` of at least 12 characters,
+`PUBLIC_HOST` and appropriate `CORS_ORIGIN`. Preserve tracker settings from the
+old release. Do not commit this file or print resolved Compose configuration with
+real credentials. Admin bootstrap runs only if there is no existing admin.
 
-- Deployed app: `/home/hasan/test-gps-tracker`, PM2 name `gps-tracker`.
-- Node 22.22.3 is currently used by that PM2 process. The new backend needs Node 24.
-- REST 3000, Socket.IO 3001, tracker TCP 5023.
-- Legacy `devices.json` and `vehicles.json` data; no historical position archive.
-- No `psql` command or port 5432 listener was observed. Recheck PostgreSQL and
-  Docker containers before provisioning to avoid conflicting with another app.
+`compose.yml` constructs the API connection URL using `postgres` as its database
+hostname. The `.env` `DATABASE_URL` is used only for host-run tools/API, where the
+host is `127.0.0.1` and the password must match `APP_DB_PASSWORD`:
 
-Install Node 24 in an app-specific path and explicitly set this app's PM2
-interpreter. Do not change the system Node binary used by other hosted apps.
-Configure `DATABASE_URL`, preserve existing tracker settings, and provide an
-initial admin bootstrap only if the new SQLite database has no admin.
-The Android release client requires HTTPS: configure a valid domain/certificate
-and reverse proxy for REST and Socket.IO before distributing a release build.
-GPS devices continue to use the existing raw TCP port.
+```dotenv
+DATABASE_URL=postgresql://gps_tracker:YOUR_APP_PASSWORD@127.0.0.1:5432/gps_tracker
+```
 
-## Candidate release and cutover
+If `POSTGRES_PORT` changes, update the host URL too. The database port binds only
+to localhost; do not publish port 5432 to the Internet.
 
-1. Record PM2's script, interpreter, working directory and restart configuration.
-   Preserve code, configuration and data in a timestamped protected backup. Do
-   not copy a live SQLite main file alone; use SQLite online backup or stop
-   writes and copy its complete state. Protect backups as application data.
-2. Build a candidate release in a separate directory. Use copied/isolated data
-   and alternate ports for validation. Check legacy vehicle import, admin login,
-   existing application flows, migrations and PostgreSQL connectivity.
-3. Run the full backend suite with a disposable PostgreSQL database. Integration
-   tests must never point at the production database. Verify multiple fixes,
-   query permissions, restart persistence, queue recovery and calendar boundaries.
-4. Stop the old process briefly, take the final consistent local data backup,
-   switch to the candidate using the preserved production data directory, and
-   start PM2 with the explicit Node 24 interpreter. Keep the existing public
-   tracker address and ports. Recheck device reconnection after cutover.
-5. Check `/health`, admin authentication, all three history endpoints and live
-   Socket.IO updates. Observe real tracker samples and confirm they survive a
-   restart. Verify the Android admin map and a guardian's denied history request.
-6. Save the verified PM2 configuration for reboot recovery. Record the history
-   collection start time and application/database versions in the release record.
+## Full backend + PostgreSQL Docker setup
 
-## Backups, monitoring and rollback
+Build the candidate and start only its database first:
 
-Use scheduled PostgreSQL logical backups (for example `pg_dump -Fc`) plus
-consistent SQLite/outbox backups, and perform a restore rehearsal into an
-isolated database. Store credentials via protected configuration or a password
-file, not command-line arguments. Keep backups off the VPS as well as local.
+```sh
+docker compose build api
+docker compose up -d --wait postgres
+docker compose ps
+```
 
-Monitor outbox backlog and oldest pending sample, database connectivity, disk
-space, insert/query latency and tracker connections. A delayed outbox means the
-history view is incomplete even when the live tracker still works. No history
-retention deletion is enabled by default; size a retention/archive policy from
-observed device count and reporting interval.
+The backend image uses Node 22 and runs as the unprivileged `node` user.
+PostgreSQL 16 uses a new project-scoped `postgres-data` volume. The initialization
+script creates `gps_tracker` as a non-superuser and owner of only the application
+database; the API does not use PostgreSQL administrator credentials. Initialization
+scripts run only for an empty volume. Changing environment passwords later does
+not rotate passwords in an existing database.
 
-Rollback switches code and PM2 settings back to the preserved release. Keep the
-new PostgreSQL history and SQLite outbox intact; do not restore an old database
-over newly accepted samples. An old release does not collect new history, so
-document that interruption and reconcile pending samples on forward recovery.
-If business data has changed after cutover, reconcile it before restoring an
-older SQLite snapshot. Never fabricate pre-installation journeys from the
-latest-position JSON.
+If migrating existing data, complete the next section before starting the API.
+For a fresh installation, start it directly:
 
-## References
+```sh
+docker compose up -d --wait api
+docker compose logs --tail=50 api
+curl --fail http://127.0.0.1:3000/health
+```
 
-- [Official PostgreSQL Docker image](https://hub.docker.com/_/postgres)
-- [Compose environment interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/)
+Stop the old API before binding its production ports. For a pre-cutover smoke
+test, set alternate host `REST_PORT`, `SOCKET_PORT`, `TCP_PORT` values in `.env`.
+Use the same Compose project directory for subsequent commands. Missing or
+unreachable `DATABASE_URL` prevents startup; health checks also verify database
+connectivity. Restart policies start the containers after a Docker/host restart.
+Configure HTTPS for REST and Socket.IO before distributing the Android release.
+Tracker TCP remains a separate port.
+
+## Explicit legacy migration
+
+The application does not read `DATA_DIR` or automatically import SQLite/JSON.
+The one-time host-run importer requires Node >=22.22.0, `npm ci`, Python 3 with
+its standard SQLite module, and access to the target PostgreSQL database.
+Python opens the source SQLite database read-only. Keep this tooling outside the
+minimal production API image.
+
+1. Stop the old API so its data cannot change during the final migration.
+2. Back up the entire legacy data directory, including any SQLite WAL/SHM files.
+   Do not copy a live SQLite main file alone. Preserve code and old PM2 settings.
+3. Set the ignored `.env` `DATABASE_URL` to the new database using localhost,
+   and `LEGACY_DATA_DIR` to the absolute path of the stopped legacy backup.
+4. Validate and apply explicitly:
+
+```sh
+npm ci
+npm run build
+node --env-file=.env scripts/import-legacy.cjs --dry-run
+node --env-file=.env scripts/import-legacy.cjs --apply
+```
+
+Dry-run validates without writing source data. Inspect its report before applying.
+The importer preserves legacy identifiers and imports supported business records,
+latest positions and pending/history data under its validation rules. It must
+not invent journeys from a single latest position. Keep any old PostgreSQL history
+database available until its historical rows have been reconciled: the SQLite/JSON
+importer is not a backup/restore tool for a separate old PostgreSQL database.
+
+Start the new API only after migration verification. Check admin/guardian login,
+vehicle assignments, bill/payment counts and history. Rehearse on a disposable
+copy first. If data has changed in PostgreSQL after cutover, rolling back code to
+SQLite requires reconciliation; simply restoring the old SQLite snapshot would
+lose new business changes.
+
+## Host-run API with Docker PostgreSQL only
+
+Use `compose.history.yml` instead of the full-stack compose file:
+
+```sh
+docker compose -f compose.history.yml up -d --wait
+npm ci
+npm run typecheck
+npm run test:unit
+npm run build
+npm run start:prod
+```
+
+Despite its historical filename, this database stores all application data.
+It has a separate `gps-tracker-local` project/volume. Do not launch both compose
+files on the same host port. Provide the mandatory localhost `DATABASE_URL` in
+`.env`. For a VPS managed by PM2, run the built entrypoint with the existing
+compatible Node interpreter and save/startup configuration after verification.
+
+## Verification and ongoing updates
+
+Database-independent tests:
+
+```sh
+npm run typecheck
+npm run test:unit
+```
+
+Full suite (dedicated disposable PostgreSQL database with schema permissions):
+
+```sh
+TEST_DATABASE_URL=postgresql://test_user:password@127.0.0.1:55432/test_db npm test
+```
+
+Never point tests at production. Verify real tracker login, fixes, live Socket.IO,
+admin daily/weekly/monthly queries and denied guardian history access. Restart
+and confirm persisted state remains. Database failure means new reports cannot
+be accepted; ACK follows successful persistence. Recovery of missing reports
+depends on tracker firmware buffering/retry. There is no durable local queue.
+
+For subsequent Docker releases, back up PostgreSQL, update the checkout, run
+verification, then rebuild/start:
+
+```sh
+docker compose build api
+docker compose up -d --wait api
+curl --fail http://127.0.0.1:3000/health
+```
+
+## Backup and monitoring
+
+```sh
+mkdir -p backups
+chmod 700 backups
+umask 077
+docker compose exec -T postgres pg_dump -U postgres -d gps_tracker -Fc > "backups/gps-tracker-$(date +%Y%m%d-%H%M%S).dump"
+```
+
+Keep backups off the VPS and rehearse restoration into an isolated database.
+Monitor database capacity, health, failed ingestion, tracker connections and
+query latency. No automatic history deletion is configured. Ordinary Compose
+shutdown preserves the volume; `docker compose down -v` deletes it. Preserve all
+old SQLite/JSON and PostgreSQL backups until migration and rollback are verified.

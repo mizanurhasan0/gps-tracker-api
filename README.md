@@ -1,9 +1,9 @@
 # GPS Tracker API + PathSathi Transport
 
-Admin-only GPS route history now uses PostgreSQL, with a durable SQLite outbox
-for database outages. See [history API](docs/HISTORY_API.md) for configuration,
-daily/weekly/monthly queries, route limits and integration tests. Existing
-transport and payment data remains in SQLite.
+All persistent application data uses one PostgreSQL database: accounts, sessions,
+vehicles, transport, payments, latest GPS positions and admin-only route history.
+See [history API](docs/HISTORY_API.md) and [Docker setup and migration](docs/HISTORY_DEPLOYMENT.md).
+There is no runtime SQLite, JSON file store or local history queue.
 
 NestJS server for GT06 protocol GPS trackers (CY03A, Concox and clones). It accepts
 raw TCP connections from devices, keeps each device's latest position, exposes an
@@ -15,12 +15,14 @@ persistent in-app notifications and audit history. No payment gateway is used.
 
 ## Start the transport service
 
-Requires **Node 24 or newer** (uses `node:sqlite`).
+Requires **Node >=22.22.0** and PostgreSQL. Docker can run both services without
+installing Node or PM2 on the host; see the deployment guide.
 
 ```sh
 npm ci
 cp .env.example .env
-# Edit .env: set ADMIN_PHONE and a unique ADMIN_PASSWORD (12+ characters).
+# Edit .env: set DATABASE_URL, ADMIN_PHONE and a unique ADMIN_PASSWORD (12+ characters).
+# Start PostgreSQL first; DATABASE_URL is required.
 npm run start:dev
 ```
 
@@ -130,7 +132,7 @@ are performed by the server.
 ```
 src/
 ├── config/app.config.ts     Typed, env-driven configuration
-├── common/json-store.ts     Reusable JSON file persistence
+├── database/                PostgreSQL pool, schema migrations and transactions
 ├── gt06/                    Device protocol
 │   ├── gt06.constants.ts    Framing bytes, CRC polynomial, bit masks
 │   ├── gt06.crc.ts          CRC-16/X-25
@@ -139,7 +141,7 @@ src/
 │   └── gt06.server.ts       TCP listener
 ├── locations/               Device positions
 │   ├── coordinates.ts       Validation and hemisphere normalization
-│   ├── locations.service.ts In-memory store + JSON persistence
+│   ├── locations.service.ts PostgreSQL latest positions and history ingestion
 │   └── locations.controller.ts
 ├── vehicles/                Vehicle registry (CRUD, validated)
 ├── realtime/                Socket.IO gateway
@@ -151,8 +153,9 @@ sockets or a Nest container.
 
 ## Configuration
 
-Copy `.env.example` to `.env`. Every value has a safe default, so the server also
-runs with no `.env` at all.
+Copy `.env.example` to `.env`. `DATABASE_URL` is mandatory: startup fails if it is
+missing or PostgreSQL is unavailable. Schema migrations run automatically. Existing
+SQLite/JSON files are never imported automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -163,7 +166,8 @@ runs with no `.env` at all.
 | `ALLOWED_IMEIS` | empty | Comma separated allowlist; empty accepts any device |
 | `ONLINE_THRESHOLD_MS` | `180000` | Window for treating a device as online |
 | `CORS_ORIGIN` | `*` | Allowed origin for REST and Socket.IO |
-| `DATA_DIR` | `./data` | Where `devices.json` and `vehicles.json` are written |
+| `DATABASE_URL` | required | PostgreSQL connection URL for all persistent data |
+| `GPS_TIMEZONE_OFFSET_MINUTES` | `0` | Tracker clock offset; independent of display timezone |
 
 ## API
 
@@ -216,13 +220,15 @@ Bodies are validated; unknown fields are rejected and IMEIs must be unique.
 
 ```bash
 curl -X POST http://localhost:3000/vehicles \
+  -H 'Authorization: Bearer YOUR_ADMIN_TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"name":"Van 01","plate":"DHK-METRO-11-1234","imei":"868720065798377"}'
 ```
 
 ### Health
 
-`GET /health` → `{ status, uptimeSeconds, device: { host, port } }`
+`GET /health` → `{ status, database: "postgresql", uptimeSeconds, device: { host, port } }`.
+Returns HTTP 503 if PostgreSQL cannot be queried.
 
 ## Realtime
 
@@ -244,36 +250,39 @@ The exact string is printed in the logs at startup.
 ## Commands
 
 ```bash
-npm install
+npm ci
 npm run start:dev     # watch mode
 npm run build         # -> dist/main.js
 npm run start:prod    # node dist/main
-npm test              # build + HTTP payment/access integration + GPS unit tests
+npm run test:unit     # build + database-independent tests
+# Full suite requires a dedicated disposable TEST_DATABASE_URL:
+TEST_DATABASE_URL=postgresql://test_user:password@localhost:5432/test_db npm test
 npm run typecheck
 ```
 
-## Storage
+## Storage and migration
 
-Transport state and vehicles live in `DATA_DIR/transport.sqlite` using foreign
-keys, unique indexes and explicit transactions (WAL mode). On first startup,
-legacy `vehicles.json` is imported once, preserving IDs/IMEIs. Invalid legacy data
-fails migration instead of silently discarding it. The source JSON is left intact.
-GPS latest-position persistence remains in `devices.json`; the protocol behavior
-is unchanged. High-frequency location history is not part of this MVP.
+One PostgreSQL database stores business data, latest positions and route history.
+Foreign keys, unique constraints and transactions protect related changes. GPS
+reports are persisted before acknowledgements are sent. An unavailable database
+prevents acceptance of new reports; connection closure permits device retries,
+whose actual behavior depends on tracker firmware. There is no local disk queue.
+A single application instance is recommended because rate limiting and realtime
+subscriptions are process-local.
 
-Before upgrading, stop the old process and back up DATA_DIR. For later backups,
-stop the service and copy the full directory, including SQLite WAL/SHM files if
-present, or use SQLite's online backup facility. Do not copy a live SQLite main
-file alone. Test restoration before relying on a backup. Schema creation and the
-legacy import are versioned in the `migrations` table. Use one server process;
-a PostgreSQL migration and distributed rate limiting would be needed before
-horizontal scaling.
+Legacy SQLite and JSON migration is an explicit operator action using
+`scripts/import-legacy.cjs`, not application startup. Stop the old writer and back
+up its entire data directory, then follow the dry-run/apply instructions in the
+[deployment guide](docs/HISTORY_DEPLOYMENT.md). Never manufacture historical
+journeys from a latest-position snapshot.
+
+Back up PostgreSQL using `pg_dump` and rehearse restoration. Keep original legacy
+backups until migration is verified. No automatic history retention is enabled.
 
 ## Verification
 
-`npm test` builds production classes and exercises the real Nest HTTP controllers
-against an isolated temporary SQLite database. Coverage includes guardian
-ownership, role escalation prevention, route coverage, duplicate/concurrent
-payments, rejected resubmission, notification failure rollback, stop revocation,
-logout, and the existing GT06 parsing/coordinate regression suite. Tests require
-permission to bind a temporary localhost HTTP port. No production data is used.
+`npm run test:unit` runs database-independent tests. `npm test` requires
+`TEST_DATABASE_URL` pointing to a disposable PostgreSQL test database. Tests create
+isolated schemas and exercise HTTP ownership/roles, payments and transaction
+rollback, GPS persistence, history and protocol behavior. Never use production
+credentials for tests. Tests also need permission to bind a localhost HTTP port.

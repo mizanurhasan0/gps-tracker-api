@@ -13,50 +13,62 @@ export interface Notification {
 @Injectable()
 export class NotificationsService {
   constructor(private readonly db: DatabaseService) {}
-  create(userId: string, title: string, body: string, entityId: string): void {
-    this.db.run(
-      'INSERT INTO notifications (id,userId,title,body,entityId,createdAt) VALUES (?,?,?,?,?,?)',
+  async create(
+    userId: string,
+    title: string,
+    body: string,
+    entityId: string
+  ): Promise<void> {
+    await this.db.run(
+      'INSERT INTO notifications (id,"userId",title,body,"entityId","createdAt") VALUES ($1,$2,$3,$4,$5,$6)',
       randomUUID(),
       userId,
       title,
       body,
       entityId,
-      new Date().toISOString(),
+      new Date().toISOString()
     );
   }
-  admins(title: string, body: string, entityId: string): void {
-    for (const admin of this.db.all<{ id: string }>(
-      "SELECT id FROM users WHERE role = 'ADMIN'",
+  async admins(title: string, body: string, entityId: string): Promise<void> {
+    for (const admin of await this.db.all<{ id: string }>(
+      "SELECT id FROM users WHERE role = 'ADMIN'"
     ))
-      this.create(admin.id, title, body, entityId);
+      await this.create(admin.id, title, body, entityId);
   }
-  list(userId: string): Notification[] {
-    return this.db.all(
-      'SELECT * FROM notifications WHERE userId = ? ORDER BY createdAt DESC LIMIT 100',
-      userId,
+  list(userId: string): Promise<Notification[]> {
+    return this.db.all<Notification>(
+      'SELECT * FROM notifications WHERE "userId" = $1 ORDER BY "createdAt" DESC LIMIT 100',
+      userId
     );
   }
-  read(userId: string, id: string): void {
+  async read(userId: string, id: string): Promise<void> {
     if (
-      !this.db.run(
-        'UPDATE notifications SET readAt = COALESCE(readAt, ?) WHERE id = ? AND userId = ?',
-        new Date().toISOString(),
-        id,
-        userId,
+      !(
+        await this.db.run(
+          'UPDATE notifications SET "readAt" = COALESCE("readAt", $1) WHERE id = $2 AND "userId" = $3',
+          new Date().toISOString(),
+          id,
+          userId
+        )
       ).changes
     ) {
       throw new NotFoundException('Notification not found');
     }
   }
-  audit(actorId: string, action: string, entityId: string, note = ''): void {
-    this.db.run(
-      'INSERT INTO audit_logs VALUES (?,?,?,?,?,?)',
+  async audit(
+    actorId: string,
+    action: string,
+    entityId: string,
+    note = ''
+  ): Promise<void> {
+    await this.db.run(
+      'INSERT INTO audit_logs (id,"actorId",action,"entityId",note,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)',
       randomUUID(),
       actorId,
       action,
       entityId,
       note,
-      new Date().toISOString(),
+      new Date().toISOString()
     );
   }
 }

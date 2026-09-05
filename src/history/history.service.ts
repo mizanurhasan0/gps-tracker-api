@@ -29,7 +29,7 @@ interface Cursor {
 export class HistoryService {
   constructor(
     private readonly repository: HistoryRepository,
-    private readonly ingestion: HistoryIngestion,
+    private readonly ingestion: HistoryIngestion
   ) {}
 
   private metadata(range: HistoryRange) {
@@ -49,7 +49,7 @@ export class HistoryService {
       )
         throw error;
       throw new ServiceUnavailableException(
-        'GPS history is temporarily unavailable; accepted samples are retained for retry',
+        'GPS history is temporarily unavailable'
       );
     }
   }
@@ -67,7 +67,7 @@ export class HistoryService {
         )
           throw new Error();
         cursor = JSON.parse(
-          Buffer.from(query.cursor, 'base64url').toString('utf8'),
+          Buffer.from(query.cursor, 'base64url').toString('utf8')
         ) as Cursor;
         if (
           !cursor ||
@@ -84,7 +84,7 @@ export class HistoryService {
           throw new Error();
       } catch {
         throw new BadRequestException(
-          'Invalid cursor or cursor does not match this device/range',
+          'Invalid cursor or cursor does not match this device/range'
         );
       }
     }
@@ -95,7 +95,7 @@ export class HistoryService {
         range,
         snapshot,
         limit + 1,
-        cursor,
+        cursor
       );
       const points = values.slice(0, limit);
       const last = points[points.length - 1];
@@ -109,7 +109,7 @@ export class HistoryService {
                 snapshot,
                 time: last.gpsTime,
                 id: last.id,
-              }),
+              })
             ).toString('base64url')
           : null;
       return { ...metadata, points, nextCursor, snapshot };
@@ -122,7 +122,7 @@ export class HistoryService {
       const metadata = this.metadata(range);
       const snapshot = await this.repository.snapshot();
       const days = summarize([], range.from, range.to);
-      const groups = new Map(days.map(day => [day.date, day]));
+      const groups = new Map(days.map((day) => [day.date, day]));
       let previous: HistoryPoint | undefined;
       for await (const points of this.batches(range, snapshot))
         for (const point of points) {
@@ -157,7 +157,7 @@ export class HistoryService {
       2000,
       2,
       2000,
-      'maxPoints',
+      'maxPoints'
     );
     return this.available(async () => {
       const metadata = this.metadata(range);
@@ -185,7 +185,7 @@ export class HistoryService {
             segments.push({ points: [point] });
             if (segments.length > maxPoints)
               throw new PayloadTooLargeException(
-                'Too many disconnected segments; select a shorter period',
+                'Too many disconnected segments; select a shorter period'
               );
           } else {
             totalDistance += distanceMeters(previous, point);
@@ -198,7 +198,7 @@ export class HistoryService {
       segments = sampleSegments(segments, maxPoints);
       const displayedPointCount = segments.reduce(
         (sum, s) => sum + s.points.length,
-        0,
+        0
       );
       return {
         ...metadata,

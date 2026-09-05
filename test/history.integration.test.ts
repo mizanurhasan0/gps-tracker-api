@@ -9,12 +9,13 @@ import { Pool } from 'pg';
 import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 
-const url = process.env.HISTORY_TEST_DATABASE_URL;
+const url =
+  process.env.TEST_DATABASE_URL ?? process.env.HISTORY_TEST_DATABASE_URL;
 
 test(
-  'PostgreSQL history, durable outbox, HTTP access and snapshot integration',
+  'Unified PostgreSQL history, atomic persistence, HTTP access and snapshot integration',
   { skip: !url },
-  async t => {
+  async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'gps-history-'));
     const schema = `history_test_${randomUUID().replace(/-/g, '')}`;
     const setup = new Pool({ connectionString: url });
@@ -29,11 +30,14 @@ test(
     const { LocationsModule } = require('../dist/locations/locations.module');
     const { LocationsService } = require('../dist/locations/locations.service');
     const { HistoryRepository } = require('../dist/history/history.repository');
-    const { HistoryIngestion } = require('../dist/history/history.ingestion');
     const { HistoryService } = require('../dist/history/history.service');
     const { DatabaseService } = require('../dist/database/database.service');
+    const { HealthController } = require('../dist/health/health.controller');
     class TestApp {}
-    Module({ imports: [SecurityModule, LocationsModule] })(TestApp);
+    Module({
+      imports: [SecurityModule, LocationsModule],
+      controllers: [HealthController],
+    })(TestApp);
     let app = await NestFactory.create(TestApp, { logger: false });
     await app.listen(0, '127.0.0.1');
     const pg = new Pool({ connectionString: isolated.toString() });
@@ -53,7 +57,6 @@ test(
       gpsFixed: true,
     });
     try {
-      let ingestion = app.get(HistoryIngestion);
       let locations = app.get(LocationsService);
       let repository = app.get(HistoryRepository);
       await repository.ensureReady();
@@ -90,35 +93,56 @@ test(
           (
             await request(
               `/locations/${imei}/history?from=bad&to=${to}`,
-              admin.token,
+              admin.token
             )
           ).status,
-          400,
+          400
         );
       });
       await t.test(
+        'database outage is explicit in health and history; latest has no local fallback',
+        async () => {
+          const db = app.get(DatabaseService);
+          const original = db.all.bind(db);
+          assert.equal((await request('/health')).status, 200);
+          db.all = async () => {
+            throw new Error('simulated PostgreSQL outage');
+          };
+          try {
+            assert.equal((await request('/health')).status, 503);
+            await assert.rejects(
+              locations.findAll(),
+              /simulated PostgreSQL outage/
+            );
+            await assert.rejects(
+              locations.findByImei(imei),
+              /simulated PostgreSQL outage/
+            );
+            await assert.rejects(
+              app.get(HistoryService).history(imei, query),
+              (error: any) => error.getStatus?.() === 503
+            );
+          } finally {
+            db.all = original;
+          }
+          assert.equal((await request('/health')).status, 200);
+        }
+      );
+      await t.test(
         'persists before returning; late points do not replace latest; invalid times and fixes excluded',
         async () => {
-          locations.savePosition(report('2024-09-02 00:00:00'));
-          locations.savePosition(report('2024-09-02 00:01:00', 23.8101));
-          locations.savePosition(report('2024-09-01 23:59:00', 23.8099));
-          locations.savePosition({
+          await locations.savePosition(report('2024-09-02 00:00:00'));
+          await locations.savePosition(report('2024-09-02 00:01:00', 23.8101));
+          await locations.savePosition(report('2024-09-01 23:59:00', 23.8099));
+          await locations.savePosition({
             ...report('2024-09-02 00:02:00'),
             gpsFixed: false,
           });
-          locations.savePosition(report('2024-02-30 12:00:00'));
+          await locations.savePosition(report('2024-02-30 12:00:00'));
           assert.equal(
-            locations.findByImei(imei).gpsTime,
-            '2024-09-02T00:01:00.000Z',
+            (await locations.findByImei(imei)).gpsTime,
+            '2024-09-02T00:01:00.000Z'
           );
-          assert.equal(
-            app
-              .get(DatabaseService)
-              .get('SELECT COUNT(*) AS count FROM gps_history_outbox').count,
-            5,
-          );
-          assert.equal(ingestion.freshness(imei, from, to).pendingPoints, 3);
-          await ingestion.flush();
           const result = await app.get(HistoryService).history(imei, query);
           assert.equal(result.points.length, 3);
           assert.equal(result.points[0].gpsTime, '2024-09-01T23:59:00.000Z');
@@ -126,30 +150,31 @@ test(
           assert.equal(
             (await pg.query('SELECT count(*)::int AS count FROM gps_history'))
               .rows[0].count,
-            5,
+            5
           );
           assert.equal((await request(path, admin.token)).status, 200);
-        },
+        }
       );
-      await t.test(
-        'retransmissions deduplicate after outbox deletion',
-        async () => {
-          locations.savePosition(report('2024-09-02 00:00:00'));
-          await ingestion.flush();
-          assert.equal(
-            (await pg.query('SELECT count(*)::int AS count FROM gps_history'))
-              .rows[0].count,
-            5,
-          );
-        },
-      );
+      await t.test('retransmissions deduplicate in PostgreSQL', async () => {
+        await locations.savePosition(report('2024-09-02 00:00:00'));
+        const latest = await locations.findByImei(imei);
+        await locations.savePosition(report('2024-09-02 00:01:00', 23.8101));
+        assert.equal(
+          (await locations.findByImei(imei)).positionAt,
+          latest.positionAt
+        );
+        assert.equal(
+          (await pg.query('SELECT count(*)::int AS count FROM gps_history'))
+            .rows[0].count,
+          5
+        );
+      });
       await t.test(
         'pagination snapshots exclude late inserts and reject cross-range cursors',
         async () => {
           const service = app.get(HistoryService);
           const first = await service.history(imei, { ...query, limit: '1' });
-          locations.savePosition(report('2024-09-02 00:00:30', 23.81005));
-          await ingestion.flush();
+          await locations.savePosition(report('2024-09-02 00:00:30', 23.81005));
           const second = await service.history(imei, {
             ...query,
             limit: '10',
@@ -159,106 +184,92 @@ test(
           assert.ok(
             second.points.every(
               (p: { gpsTime: string }) =>
-                p.gpsTime !== '2024-09-02T00:00:30.000Z',
-            ),
+                p.gpsTime !== '2024-09-02T00:00:30.000Z'
+            )
           );
           await assert.rejects(
             service.history('868720065798378', {
               ...query,
               cursor: first.nextCursor,
             }),
-            /Invalid cursor/,
+            /Invalid cursor/
           );
-        },
+        }
       );
       await t.test(
-        'outbox survives unavailable PostgreSQL and application restart',
+        'latest and history roll back together when latest persistence fails',
         async () => {
+          const before = await locations.findByImei(imei);
+          const count = (
+            await pg.query('SELECT count(*)::int AS count FROM gps_history')
+          ).rows[0].count;
+          await pg.query(`CREATE FUNCTION reject_device_write() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RAISE EXCEPTION 'simulated device write failure'; END $$;
+          CREATE TRIGGER reject_device_write BEFORE INSERT OR UPDATE ON devices
+          FOR EACH ROW EXECUTE FUNCTION reject_device_write()`);
+          try {
+            await assert.rejects(
+              locations.savePosition(report('2024-09-02 00:03:00', 23.8103)),
+              /simulated device write failure/
+            );
+            assert.deepEqual(await locations.findByImei(imei), before);
+            assert.equal(
+              (await pg.query('SELECT count(*)::int AS count FROM gps_history'))
+                .rows[0].count,
+              count
+            );
+          } finally {
+            await pg.query(
+              'DROP TRIGGER reject_device_write ON devices; DROP FUNCTION reject_device_write()'
+            );
+          }
+        }
+      );
+      await t.test(
+        'history insertion failure does not advance the latest fix',
+        async () => {
+          const before = await locations.findByImei(imei);
           const original = repository.insert.bind(repository);
           repository.insert = async () => {
-            throw new Error('simulated database outage');
+            throw new Error('simulated history write failure');
           };
-          locations.savePosition(report('2024-09-02 00:03:00', 23.8103));
-          await ingestion.flush();
-          assert.equal(ingestion.freshness(imei, from, to).pendingPoints, 1);
+          try {
+            await assert.rejects(
+              locations.savePosition(report('2024-09-02 00:03:00', 23.8103)),
+              /simulated history write failure/
+            );
+            assert.deepEqual(await locations.findByImei(imei), before);
+          } finally {
+            repository.insert = original;
+          }
+        }
+      );
+      await t.test(
+        'latest device state and history survive application restart in PostgreSQL',
+        async () => {
+          await locations.savePosition(report('2024-09-02 00:03:00', 23.8103));
           await app.close();
-          repository.insert = original;
           app = await NestFactory.create(TestApp, { logger: false });
-          // Nest init may immediately drain: both outcomes prove the queued event survives.
           await app.init();
-          ingestion = app.get(HistoryIngestion);
           repository = app.get(HistoryRepository);
           locations = app.get(LocationsService);
-          await ingestion.flush();
           const result = await app.get(HistoryService).history(imei, query);
           assert.ok(
             result.points.some(
               (p: { gpsTime: string }) =>
-                p.gpsTime === '2024-09-02T00:03:00.000Z',
-            ),
+                p.gpsTime === '2024-09-02T00:03:00.000Z'
+            )
           );
           assert.equal(result.freshness.complete, true);
           assert.equal(
-            locations.findByImei(imei).gpsTime,
-            '2024-09-02T00:03:00.000Z',
+            (await locations.findByImei(imei)).gpsTime,
+            '2024-09-02T00:03:00.000Z'
           );
-        },
-      );
-      await t.test(
-        'does not acknowledge a report when durable enqueue fails',
-        async () => {
-          const { Gt06Connection } = require('../dist/gt06/gt06.connection');
-          const { crc16X25 } = require('../dist/gt06/gt06.crc');
-          const body = Buffer.from(
-            '120B081D112E10CC027AC7EB0C46584900148F',
-            'hex',
-          );
-          const checksummed = Buffer.concat([
-            Buffer.from([body.length + 4]),
-            body,
-            Buffer.from([0, 3]),
-          ]);
-          const crc = Buffer.alloc(2);
-          crc.writeUInt16BE(crc16X25(checksummed));
-          const frame = Buffer.concat([
-            Buffer.from([0x78, 0x78]),
-            checksummed,
-            crc,
-            Buffer.from([0x0d, 0x0a]),
-          ]);
-          const writes: Buffer[] = [];
-          const socket = {
-            remoteAddress: '127.0.0.1',
-            remotePort: 1234,
-            destroyed: false,
-            write: (buffer: Buffer) => writes.push(buffer),
-            destroy: () => undefined,
-          };
-          const connection = new Gt06Connection(socket, locations, {
-            publishLocation: () => undefined,
-          });
-          connection.handleData(
-            Buffer.from('78780D0108687200657983770001F9790D0A', 'hex'),
-          );
-          assert.equal(writes.length, 1);
-          const db = app.get(DatabaseService);
-          db.exec(
-            "CREATE TRIGGER reject_history BEFORE INSERT ON gps_history_outbox BEGIN SELECT RAISE(FAIL,'simulated full disk'); END;",
-          );
-          try {
-            assert.throws(
-              () => connection.handleData(frame),
-              /simulated full disk/,
-            );
-            assert.equal(
-              writes.length,
-              1,
-              'failed position did not receive an ACK',
-            );
-          } finally {
-            db.exec('DROP TRIGGER reject_history');
-          }
-        },
+          const stored = (
+            await pg.query('SELECT record FROM devices WHERE imei=$1', [imei])
+          ).rows[0].record;
+          assert.equal(stored.position.gpsTime, '2024-09-02T00:03:00.000Z');
+        }
       );
       await t.test(
         'unavailable history is explicit rather than an empty successful result',
@@ -275,43 +286,42 @@ test(
                   error &&
                     typeof error === 'object' &&
                     'getStatus' in error &&
-                    (error as { getStatus: () => number }).getStatus() === 503,
-                ),
+                    (error as { getStatus: () => number }).getStatus() === 503
+                )
             );
           } finally {
             repository.snapshot = original;
           }
-        },
+        }
       );
       await t.test(
         'vehicle identity remains a historical snapshot after reassignment',
         async () => {
           const db = app.get(DatabaseService);
-          db.run(
-            'INSERT INTO vehicles(id,name,plate,imei,createdAt,updatedAt) VALUES(?,?,?,?,?,?)',
+          await db.run(
+            'INSERT INTO vehicles(id,name,plate,imei,"createdAt","updatedAt") VALUES($1,$2,$3,$4,$5,$6)',
             'old-vehicle',
             'Old',
             'OLD',
             imei,
             from,
-            from,
+            from
           );
-          locations.savePosition(report('2024-09-02 00:04:00', 23.8104));
-          await ingestion.flush();
-          db.run(
-            'UPDATE vehicles SET imei=? WHERE id=?',
+          await locations.savePosition(report('2024-09-02 00:04:00', 23.8104));
+          await db.run(
+            'UPDATE vehicles SET imei=$1 WHERE id=$2',
             '868720065798379',
-            'old-vehicle',
+            'old-vehicle'
           );
           const result = await app.get(HistoryService).history(imei, query);
           assert.equal(
             result.points.find(
               (p: { gpsTime: string }) =>
-                p.gpsTime === '2024-09-02T00:04:00.000Z',
+                p.gpsTime === '2024-09-02T00:04:00.000Z'
             ).vehicleId,
-            'old-vehicle',
+            'old-vehicle'
           );
-        },
+        }
       );
       await t.test(
         'dense 31-day summary and route remain bounded without truncating raw counts',
@@ -321,7 +331,7 @@ test(
             `INSERT INTO gps_history(event_key,imei,gps_time,received_at,latitude,longitude,speed,course,quality,raw_gps_time)
         SELECT 'dense-'||i,$1,'2024-08-31T18:00:00Z'::timestamptz+i*interval '10 seconds','2024-08-31T18:00:00Z'::timestamptz+i*interval '10 seconds',23.81,90.41,0,0,'valid','fixture'
         FROM generate_series(0,267839) i`,
-            [denseImei],
+            [denseImei]
           );
           const service = app.get(HistoryService);
           const range = {
@@ -334,9 +344,9 @@ test(
             summary.days.reduce(
               (sum: number, day: { pointCount: number }) =>
                 sum + day.pointCount,
-              0,
+              0
             ),
-            267840,
+            267840
           );
           const route = await service.route(denseImei, {
             ...range,
@@ -355,20 +365,20 @@ test(
             assert.ok(
               route.segments[0].points.filter(
                 (p: { gpsTime: string }) =>
-                  p.gpsTime >= start && p.gpsTime < end,
+                  p.gpsTime >= start && p.gpsTime < end
               ).length >= 15,
-              'route retains balanced early, middle and late samples',
+              'route retains balanced early, middle and late samples'
             );
           }
           assert.equal(
             route.segments[0].points[0].gpsTime,
-            '2024-08-31T18:00:00.000Z',
+            '2024-08-31T18:00:00.000Z'
           );
           assert.equal(
             route.segments[0].points.at(-1).gpsTime,
-            '2024-10-01T17:59:50.000Z',
+            '2024-10-01T17:59:50.000Z'
           );
-        },
+        }
       );
     } finally {
       await app.close();
@@ -377,5 +387,5 @@ test(
       await setup.end();
       rmSync(directory, { recursive: true, force: true });
     }
-  },
+  }
 );

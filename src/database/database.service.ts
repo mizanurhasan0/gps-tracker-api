@@ -1,83 +1,144 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
-import { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { appConfig } from '../config/app.config';
+import {
+  Injectable,
+  Logger,
+  OnApplicationShutdown,
+  OnModuleInit,
+} from '@nestjs/common';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { Pool, PoolClient, QueryResultRow } from 'pg';
 import { schema } from './schema';
+import { appConfig } from '../config/app.config';
 
+export interface MutationResult {
+  rowCount: number;
+  /** Compatibility with existing affected-row checks. */
+  changes: number;
+}
+
+/** One pool and one transaction context for every application domain. */
 @Injectable()
-export class DatabaseService implements OnApplicationShutdown {
-  private readonly connection: DatabaseSync;
+export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
+  private readonly logger = new Logger(DatabaseService.name);
+  private readonly pool: Pool;
+  private readonly transactions = new AsyncLocalStorage<PoolClient>();
+  private initialization?: Promise<void>;
+  private closing = false;
 
   constructor() {
-    mkdirSync(appConfig.storage.dataDir, { recursive: true });
-    this.connection = new DatabaseSync(
-      join(appConfig.storage.dataDir, 'transport.sqlite'),
+    const url = appConfig.database.url;
+    if (!url || !/^postgres(?:ql)?:\/\//.test(url)) {
+      throw new Error(
+        'DATABASE_URL is required and must be a PostgreSQL connection URL'
+      );
+    }
+    this.pool = new Pool({
+      connectionString: url,
+      max: 10,
+      connectionTimeoutMillis: 5000,
+      idleTimeoutMillis: 30000,
+      statement_timeout: 15000,
+      query_timeout: 20000,
+      idle_in_transaction_session_timeout: 20000,
+    });
+    this.pool.on('error', () =>
+      this.logger.error('PostgreSQL connection unavailable')
     );
-    this.connection.exec(
-      'PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;',
-    );
-    this.connection.exec(schema);
-    this.migrateVehicles();
   }
 
-  all<T>(sql: string, ...params: SQLInputValue[]): T[] {
-    return this.connection.prepare(sql).all(...params) as T[];
+  async onModuleInit(): Promise<void> {
+    await this.ensureReady();
   }
 
-  exec(sql: string): void {
-    this.connection.exec(sql);
+  ensureReady(): Promise<void> {
+    if (this.closing)
+      return Promise.reject(new Error('Database is shutting down'));
+    if (!this.initialization) {
+      this.initialization = this.migrate().catch((error) => {
+        this.initialization = undefined;
+        throw error;
+      });
+    }
+    return this.initialization;
   }
 
-  get<T>(sql: string, ...params: SQLInputValue[]): T | undefined {
-    return this.connection.prepare(sql).get(...params) as T | undefined;
-  }
-
-  run(sql: string, ...params: SQLInputValue[]) {
-    return this.connection.prepare(sql).run(...params);
-  }
-
-  /** Keep callbacks synchronous: a transaction must never cross an await. */
-  transaction<T>(work: () => T): T {
-    this.connection.exec('BEGIN IMMEDIATE');
+  private async migrate(): Promise<void> {
+    const client = await this.pool.connect();
     try {
-      const result = work();
-      this.connection.exec('COMMIT');
-      return result;
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(74523001)');
+      await client.query(`CREATE TABLE IF NOT EXISTS app_migrations (
+        version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`);
+      const applied = await client.query(
+        'SELECT version FROM app_migrations WHERE version = 1'
+      );
+      if (!applied.rowCount) {
+        await client.query(schema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(1)');
+      }
+      await client.query('COMMIT');
     } catch (error) {
-      this.connection.exec('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => undefined);
       throw error;
+    } finally {
+      client.release();
     }
   }
 
-  onApplicationShutdown(): void {
-    this.connection.close();
+  async all<T = Record<string, unknown>>(
+    sql: string,
+    ...params: unknown[]
+  ): Promise<T[]> {
+    await this.ensureReady();
+    const executor = this.transactions.getStore() ?? this.pool;
+    const result = await executor.query<QueryResultRow>(sql, params);
+    return result.rows as T[];
   }
 
-  private migrateVehicles(): void {
-    if (this.get('SELECT version FROM migrations WHERE version = 2')) return;
-    const file = join(appConfig.storage.dataDir, 'vehicles.json');
-    this.transaction(() => {
-      if (existsSync(file)) {
-        const vehicles = JSON.parse(readFileSync(file, 'utf8'));
-        if (!Array.isArray(vehicles))
-          throw new Error('vehicles.json must contain an array');
-        for (const vehicle of vehicles) {
-          this.run(
-            `INSERT INTO vehicles (id,name,plate,imei,driverName,driverPhone,createdAt,updatedAt)
-            VALUES (?,?,?,?,?,?,?,?)`,
-            vehicle.id,
-            vehicle.name,
-            vehicle.plate,
-            vehicle.imei,
-            vehicle.driverName ?? null,
-            vehicle.driverPhone ?? null,
-            vehicle.createdAt,
-            vehicle.updatedAt,
-          );
-        }
+  async get<T = Record<string, unknown>>(
+    sql: string,
+    ...params: unknown[]
+  ): Promise<T | undefined> {
+    return (await this.all<T>(sql, ...params))[0];
+  }
+
+  async run(sql: string, ...params: unknown[]): Promise<MutationResult> {
+    await this.ensureReady();
+    const executor = this.transactions.getStore() ?? this.pool;
+    const result = await executor.query(sql, params);
+    return { rowCount: result.rowCount ?? 0, changes: result.rowCount ?? 0 };
+  }
+
+  async exec(sql: string): Promise<void> {
+    await this.run(sql);
+  }
+
+  /** Nested services join the same transaction; only the outer callback retries.
+   * Keep external side effects outside callbacks: a serializable conflict retries them.
+   */
+  async transaction<T>(work: () => Promise<T>): Promise<T> {
+    if (this.transactions.getStore()) return work();
+    await this.ensureReady();
+    for (let attempt = 0; ; attempt++) {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+        const result = await this.transactions.run(client, work);
+        await client.query('COMMIT');
+        return result;
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        const code = (error as { code?: string }).code;
+        if (attempt >= 3 || (code !== '40001' && code !== '40P01')) throw error;
+      } finally {
+        client.release();
       }
-      this.run('INSERT INTO migrations(version) VALUES (2)');
-    });
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    this.closing = true;
+    await this.pool.end();
   }
 }

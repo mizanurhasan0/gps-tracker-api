@@ -10,6 +10,6 @@ export class NotificationsController {
   @Patch(':id/read')
   @HttpCode(204)
   read(@Req() req: AuthRequest, @Param('id') id: string) {
-    this.notifications.read(req.user.id, id);
+    return this.notifications.read(req.user.id, id);
   }
 }

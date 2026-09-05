@@ -1,12 +1,11 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { appConfig } from '../config/app.config';
-import { JsonStore } from '../common/json-store';
+import { DatabaseService } from '../database/database.service';
 import { HistoryIngestion } from '../history/history.ingestion';
 import { parseGpsTime } from '../history/history.math';
 import { isValidCoordinates, normalizeCoordinates } from './coordinates';
 import type {
   DeviceLocation,
-  DevicePosition,
   DeviceRecord,
   DeviceStatus,
 } from './location.types';
@@ -29,94 +28,107 @@ export interface StatusReport {
 }
 
 @Injectable()
-export class LocationsService implements OnModuleInit {
-  private readonly logger = new Logger(LocationsService.name);
-  private readonly store = new JsonStore<DeviceRecord[]>(
-    appConfig.storage.dataDir,
-    'devices.json',
-  );
-  private readonly devices = new Map<string, DeviceRecord>();
+export class LocationsService {
+  constructor(
+    private readonly history: HistoryIngestion,
+    private readonly db: DatabaseService
+  ) {}
 
-  constructor(private readonly history: HistoryIngestion) {}
-
-  onModuleInit(): void {
-    for (const record of this.store.read([])) {
-      const migrated = migrateRecord(record);
-      if (migrated) {
-        this.devices.set(migrated.imei, migrated);
-      }
-    }
-
-    this.logger.log(`Restored ${this.devices.size} device record(s)`);
+  /** Persist modem contact using the same database as business data and history. */
+  async touch(imei: string, status: StatusReport = {}): Promise<DeviceRecord> {
+    return this.db.transaction(async () => {
+      const existing = await this.lockRecord(imei);
+      const record: DeviceRecord = {
+        ...existing,
+        imei,
+        lastSeen: new Date().toISOString(),
+        gsmSignal: status.gsmSignal ?? existing?.gsmSignal,
+        voltageLevel: status.voltageLevel ?? existing?.voltageLevel,
+      };
+      await this.persist(record);
+      return record;
+    });
   }
 
-  /** Records any contact from the device, optionally with modem status */
-  touch(imei: string, status: StatusReport = {}): DeviceRecord {
-    const existing = this.devices.get(imei);
-    const record: DeviceRecord = {
-      ...existing,
-      imei,
-      lastSeen: new Date().toISOString(),
-      gsmSignal: status.gsmSignal ?? existing?.gsmSignal,
-      voltageLevel: status.voltageLevel ?? existing?.voltageLevel,
-    };
-
-    this.devices.set(imei, record);
-    return record;
-  }
-
-  /**
-   * Stores a GPS fix. Reports without a usable fix only refresh `lastSeen`, so
-   * the previous position stays available as the last known location.
-   */
-  savePosition(report: PositionReport): DeviceLocation {
-    if (!isValidCoordinates(report.latitude, report.longitude)) {
-      return this.toLocation(this.touch(report.imei));
-    }
-
+  /** History and latest fix commit atomically before the tracker receives its ACK. */
+  async savePosition(report: PositionReport): Promise<DeviceLocation> {
+    if (!isValidCoordinates(report.latitude, report.longitude))
+      return this.toLocation(await this.touch(report.imei));
     const { latitude, longitude } =
       report.protocol !== undefined
         ? report
         : normalizeCoordinates(report.latitude, report.longitude);
-
     const receivedAt = new Date().toISOString();
-    // Synchronous durable enqueue occurs before the connection sends its ACK.
-    const gpsTime = this.history.enqueue(
-      { ...report, latitude, longitude },
-      receivedAt,
+    return this.db.transaction(async () => {
+      const existing = await this.lockRecord(report.imei);
+      const gpsTime = await this.history.record(
+        { ...report, latitude, longitude },
+        receivedAt
+      );
+      const previous = existing?.position;
+      const previousTime = previous
+        ? parseGpsTime(
+            previous.gpsTime,
+            Number(process.env.GPS_TIMEZONE_OFFSET_MINUTES ?? 0)
+          )
+        : null;
+      const record: DeviceRecord = {
+        ...existing,
+        imei: report.imei,
+        lastSeen: receivedAt,
+      };
+      // Invalid, delayed and retransmitted fixes must not refresh or regress the latest position.
+      if (gpsTime && (!previousTime || gpsTime > previousTime)) {
+        record.position = {
+          latitude,
+          longitude,
+          speed: report.speed,
+          course: report.course,
+          gpsTime,
+          receivedAt,
+        };
+      }
+      await this.persist(record);
+      return this.toLocation(record);
+    });
+  }
+
+  async findAll(): Promise<DeviceLocation[]> {
+    const rows = await this.db.all<{ record: DeviceRecord }>(
+      'SELECT record FROM devices ORDER BY imei'
     );
-    const previous = this.devices.get(report.imei)?.position;
-    const previousTime = previous
-      ? parseGpsTime(
-          previous.gpsTime,
-          Number(process.env.GPS_TIMEZONE_OFFSET_MINUTES ?? 0),
-        )
-      : null;
-    if (!gpsTime || (previousTime && gpsTime < previousTime))
-      return this.toLocation(this.touch(report.imei));
-    const position: DevicePosition = {
-      latitude,
-      longitude,
-      speed: report.speed,
-      course: report.course,
-      gpsTime,
-      receivedAt,
-    };
-
-    const record: DeviceRecord = { ...this.touch(report.imei), position };
-    this.devices.set(record.imei, record);
-    this.persist();
-
-    return this.toLocation(record);
+    return rows.map((row) => this.toLocation(row.record));
   }
 
-  findAll(): DeviceLocation[] {
-    return [...this.devices.values()].map(record => this.toLocation(record));
+  async findByImei(imei: string): Promise<DeviceLocation | null> {
+    const row = await this.db.get<{ record: DeviceRecord }>(
+      'SELECT record FROM devices WHERE imei=$1',
+      imei
+    );
+    return row ? this.toLocation(row.record) : null;
   }
 
-  findByImei(imei: string): DeviceLocation | null {
-    const record = this.devices.get(imei);
-    return record ? this.toLocation(record) : null;
+  private async lockRecord(imei: string): Promise<DeviceRecord | undefined> {
+    // Also serializes first contact where no row exists yet, across API processes.
+    await this.db.run(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+      imei
+    );
+    return (
+      await this.db.get<{ record: DeviceRecord }>(
+        'SELECT record FROM devices WHERE imei=$1 FOR UPDATE',
+        imei
+      )
+    )?.record;
+  }
+
+  private async persist(record: DeviceRecord): Promise<void> {
+    await this.db.run(
+      `INSERT INTO devices(imei,record) VALUES($1,$2::jsonb)
+      ON CONFLICT(imei) DO UPDATE SET record=EXCLUDED.record`,
+      record.imei,
+      JSON.stringify(record)
+    );
   }
 
   private toLocation(record: DeviceRecord): DeviceLocation {
@@ -153,68 +165,4 @@ export class LocationsService implements OnModuleInit {
       positionAt: position?.receivedAt,
     };
   }
-
-  private persist(): void {
-    this.store.write([...this.devices.values()]);
-  }
-}
-
-/** Legacy record shape written before positions were nested */
-interface LegacyDeviceRecord {
-  imei?: string;
-  latitude?: number;
-  longitude?: number;
-  speed?: number;
-  course?: number;
-  gpsTime?: string;
-  timestamp?: string;
-  lastSeen?: string;
-  gsmSignal?: number;
-  voltageLevel?: number;
-  lastValidLatitude?: number;
-  lastValidLongitude?: number;
-  lastValidGpsTime?: string;
-  lastValidTimestamp?: string;
-}
-
-function migrateRecord(record: DeviceRecord): DeviceRecord | null {
-  if (!record?.imei) {
-    return null;
-  }
-
-  if (record.position) {
-    return record;
-  }
-
-  const legacy = record as DeviceRecord & LegacyDeviceRecord;
-  const latitude = legacy.lastValidLatitude ?? legacy.latitude;
-  const longitude = legacy.lastValidLongitude ?? legacy.longitude;
-  const lastSeen = legacy.lastSeen ?? new Date().toISOString();
-
-  const base: DeviceRecord = {
-    imei: record.imei,
-    lastSeen,
-    gsmSignal: legacy.gsmSignal,
-    voltageLevel: legacy.voltageLevel,
-  };
-
-  if (latitude == null || longitude == null) {
-    return base;
-  }
-  if (!isValidCoordinates(latitude, longitude)) {
-    return base;
-  }
-
-  const normalized = normalizeCoordinates(latitude, longitude);
-
-  return {
-    ...base,
-    position: {
-      ...normalized,
-      speed: legacy.speed ?? 0,
-      course: legacy.course ?? 0,
-      gpsTime: legacy.lastValidGpsTime ?? legacy.gpsTime ?? '',
-      receivedAt: legacy.lastValidTimestamp ?? legacy.timestamp ?? lastSeen,
-    },
-  };
 }

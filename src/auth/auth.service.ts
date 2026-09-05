@@ -17,7 +17,7 @@ import { DatabaseService } from '../database/database.service';
 import { LoginDto, RegisterDto } from './auth.dto';
 import { User } from './auth.types';
 const scrypt = promisify(scryptCallback);
-const publicColumns = 'id,name,phone,role,verified,createdAt';
+const publicColumns = 'id,name,phone,role,verified,"createdAt"';
 
 @Injectable()
 export class AuthService implements OnModuleInit {
@@ -38,24 +38,29 @@ export class AuthService implements OnModuleInit {
       password.length < 12
     ) {
       throw new Error(
-        'Set ADMIN_PHONE to a Bangladesh mobile number and ADMIN_PASSWORD to at least 12 characters',
+        'Set ADMIN_PHONE to a Bangladesh mobile number and ADMIN_PASSWORD to at least 12 characters'
       );
     }
-    if (this.db.get("SELECT id FROM users WHERE role = 'ADMIN'")) return;
     const hash = await this.hashPassword(password);
-    if (this.db.get('SELECT id FROM users WHERE phone = ?', phone)) {
-      throw new Error(
-        'ADMIN_PHONE already belongs to an account; use an unused number for bootstrap',
+    await this.db.transaction(async () => {
+      // Serialize concurrent bootstrap attempts, including different admin phones.
+      await this.db.run('LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE');
+      if (await this.db.get("SELECT id FROM users WHERE role = 'ADMIN'"))
+        return;
+      if (await this.db.get('SELECT id FROM users WHERE phone = $1', phone)) {
+        throw new Error(
+          'ADMIN_PHONE already belongs to an account; use an unused number for bootstrap'
+        );
+      }
+      await this.db.run(
+        `INSERT INTO users (id,name,phone,"passwordHash",role,verified,"createdAt") VALUES ($1,$2,$3,$4,'ADMIN',1,$5)`,
+        randomUUID(),
+        'Transport Admin',
+        phone,
+        hash,
+        new Date().toISOString()
       );
-    }
-    this.db.run(
-      `INSERT INTO users (id,name,phone,passwordHash,role,verified,createdAt) VALUES (?,?,?,?, 'ADMIN',1,?)`,
-      randomUUID(),
-      'Transport Admin',
-      phone,
-      hash,
-      new Date().toISOString(),
-    );
+    });
   }
 
   throttle(key: string): void {
@@ -71,30 +76,36 @@ export class AuthService implements OnModuleInit {
     if (state.count > 15)
       throw new HttpException(
         'Too many attempts. Please try again in 15 minutes.',
-        429,
+        429
       );
   }
 
   async register(input: RegisterDto) {
     const passwordHash = await this.hashPassword(input.password);
-    if (this.db.get('SELECT id FROM users WHERE phone = ?', input.phone))
-      throw new ConflictException('This phone number is already registered');
-    const id = randomUUID();
-    this.db.run(
-      `INSERT INTO users (id,name,phone,passwordHash,role,createdAt) VALUES (?,?,?,?, 'GUARDIAN',?)`,
-      id,
-      input.name,
-      input.phone,
-      passwordHash,
-      new Date().toISOString(),
-    );
-    return this.issueSession(id);
+    try {
+      return await this.db.transaction(async () => {
+        const id = randomUUID();
+        await this.db.run(
+          `INSERT INTO users (id,name,phone,"passwordHash",role,"createdAt") VALUES ($1,$2,$3,$4,'GUARDIAN',$5)`,
+          id,
+          input.name,
+          input.phone,
+          passwordHash,
+          new Date().toISOString()
+        );
+        return this.issueSession(id);
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException('This phone number is already registered');
+      throw error;
+    }
   }
 
   async login(input: LoginDto) {
-    const account = this.db.get<User & { passwordHash: string }>(
-      'SELECT * FROM users WHERE phone = ?',
-      input.phone,
+    const account = await this.db.get<User & { passwordHash: string }>(
+      'SELECT * FROM users WHERE phone = $1',
+      input.phone
     );
     // Derive a key even for unknown accounts to avoid a cheap user enumeration path.
     const [salt, expected] = (
@@ -106,48 +117,51 @@ export class AuthService implements OnModuleInit {
     return this.issueSession(account.id);
   }
 
-  authenticate(token: string | undefined): User {
+  async authenticate(token: string | undefined): Promise<User> {
     if (!token || !/^[a-f0-9]{64}$/.test(token))
       throw new UnauthorizedException('Please sign in');
-    const user = this.db.get<User>(
+    const user = await this.db.get<User>(
       `SELECT u.${publicColumns.split(',').join(',u.')} FROM users u
-      JOIN sessions s ON s.userId = u.id WHERE s.tokenHash = ? AND s.expiresAt > ?`,
+      JOIN sessions s ON s."userId" = u.id WHERE s."tokenHash" = $1 AND s."expiresAt" > $2`,
       this.digest(token),
-      new Date().toISOString(),
+      new Date().toISOString()
     );
     if (!user)
       throw new UnauthorizedException(
-        'Your session expired. Please sign in again',
+        'Your session expired. Please sign in again'
       );
     return user;
   }
 
-  logout(token: string): void {
-    this.db.run('DELETE FROM sessions WHERE tokenHash = ?', this.digest(token));
+  async logout(token: string): Promise<void> {
+    await this.db.run(
+      'DELETE FROM sessions WHERE "tokenHash" = $1',
+      this.digest(token)
+    );
   }
 
-  private issueSession(id: string) {
+  private async issueSession(id: string) {
     const token = randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60_000).toISOString();
-    this.db.transaction(() => {
-      this.db.run(
-        'DELETE FROM sessions WHERE expiresAt <= ?',
-        new Date().toISOString(),
+    await this.db.transaction(async () => {
+      await this.db.run(
+        'DELETE FROM sessions WHERE "expiresAt" <= $1',
+        new Date().toISOString()
       );
-      this.db.run(
-        'INSERT INTO sessions VALUES (?,?,?)',
+      await this.db.run(
+        'INSERT INTO sessions ("tokenHash","userId","expiresAt") VALUES ($1,$2,$3)',
         this.digest(token),
         id,
-        expiresAt,
+        expiresAt
       );
     });
     return {
       token,
       expiresAt,
-      user: this.db.get<User>(
-        `SELECT ${publicColumns} FROM users WHERE id = ?`,
-        id,
-      )!,
+      user: (await this.db.get<User>(
+        `SELECT ${publicColumns} FROM users WHERE id = $1`,
+        id
+      ))!,
     };
   }
 

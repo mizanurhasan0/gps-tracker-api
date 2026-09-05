@@ -21,41 +21,47 @@ import type { Vehicle } from './vehicle.types';
 export class VehiclesController {
   constructor(
     private readonly vehicles: VehiclesService,
-    private readonly access: AccessService,
+    private readonly access: AccessService
   ) {}
 
   @Get()
-  findAll(@Req() req: AuthRequest): { vehicles: Vehicle[] } {
-    return {
-      vehicles: this.vehicles
-        .findAll()
-        .filter(vehicle => this.access.canTrack(req.user, vehicle.imei)),
-    };
+  async findAll(@Req() req: AuthRequest): Promise<{ vehicles: Vehicle[] }> {
+    const vehicles = await this.vehicles.findAll();
+    const allowed = await Promise.all(
+      vehicles.map((vehicle) => this.access.canTrack(req.user, vehicle.imei))
+    );
+    return { vehicles: vehicles.filter((_, index) => allowed[index]) };
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string, @Req() req: AuthRequest): Vehicle {
-    const vehicle = this.vehicles.findOne(id);
-    this.access.assertTracking(req.user, vehicle.imei);
+  async findOne(
+    @Param('id') id: string,
+    @Req() req: AuthRequest
+  ): Promise<Vehicle> {
+    const vehicle = await this.vehicles.findOne(id);
+    await this.access.assertTracking(req.user, vehicle.imei);
     return vehicle;
   }
 
   @Roles('ADMIN')
   @Post()
-  create(@Body() body: CreateVehicleDto): Vehicle {
+  create(@Body() body: CreateVehicleDto): Promise<Vehicle> {
     return this.vehicles.create(body);
   }
 
   @Roles('ADMIN')
   @Patch(':id')
-  update(@Param('id') id: string, @Body() body: UpdateVehicleDto): Vehicle {
+  update(
+    @Param('id') id: string,
+    @Body() body: UpdateVehicleDto
+  ): Promise<Vehicle> {
     return this.vehicles.update(id, body);
   }
 
   @Roles('ADMIN')
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  remove(@Param('id') id: string): void {
-    this.vehicles.remove(id);
+  remove(@Param('id') id: string): Promise<void> {
+    return this.vehicles.remove(id);
   }
 }

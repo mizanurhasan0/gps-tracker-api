@@ -1,5 +1,4 @@
 import { existsSync } from 'node:fs';
-import * as path from 'path';
 
 if (existsSync('.env')) process.loadEnvFile('.env');
 
@@ -16,7 +15,7 @@ function readString(value: string | undefined, fallback: string): string {
 function readList(value: string | undefined): string[] {
   return readString(value, '')
     .split(',')
-    .map(item => item.trim())
+    .map((item) => item.trim())
     .filter(Boolean);
 }
 
@@ -41,8 +40,8 @@ export const appConfig = {
     /** Empty list accepts any IMEI */
     allowedImeis: readList(process.env.ALLOWED_IMEIS),
   },
-  storage: {
-    dataDir: readString(process.env.DATA_DIR, path.join(process.cwd(), 'data')),
+  database: {
+    url: readString(process.env.DATABASE_URL, ''),
   },
 } as const;
 

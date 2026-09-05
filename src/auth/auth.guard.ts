@@ -14,21 +14,21 @@ export const Roles = (...roles: Role[]) => SetMetadata('roles', roles);
 export class AuthGuard implements CanActivate {
   constructor(
     private readonly auth: AuthService,
-    private readonly reflector: Reflector,
+    private readonly reflector: Reflector
   ) {}
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') return true;
     const targets = [context.getHandler(), context.getClass()];
     if (this.reflector.getAllAndOverride<boolean>('public', targets))
       return true;
     const request = context.switchToHttp().getRequest<AuthRequest>();
-    request.user = this.auth.authenticate(
-      request.headers.authorization?.replace(/^Bearer /, ''),
+    request.user = await this.auth.authenticate(
+      request.headers.authorization?.replace(/^Bearer /, '')
     );
     const roles = this.reflector.getAllAndOverride<Role[]>('roles', targets);
     if (roles && !roles.includes(request.user.role))
       throw new ForbiddenException(
-        'You do not have permission for this action',
+        'You do not have permission for this action'
       );
     return true;
   }
