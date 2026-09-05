@@ -31,6 +31,8 @@ export interface Gt06Position {
   speed: number;
   course: number;
   status: number;
+  gpsFixed: boolean;
+  satellites: number;
   /** Device clock, formatted `YYYY-MM-DD HH:mm:ss` */
   gpsTime: string;
 }

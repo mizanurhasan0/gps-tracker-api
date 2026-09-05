@@ -1,8 +1,129 @@
-# GPS Tracker API
+# GPS Tracker API + PathSathi Transport
+
+Admin-only GPS route history now uses PostgreSQL, with a durable SQLite outbox
+for database outages. See [history API](docs/HISTORY_API.md) for configuration,
+daily/weekly/monthly queries, route limits and integration tests. Existing
+transport and payment data remains in SQLite.
 
 NestJS server for GT06 protocol GPS trackers (CY03A, Concox and clones). It accepts
-raw TCP connections from devices, keeps each device's latest position, exposes a
-REST API, and pushes live updates over Socket.IO.
+raw TCP connections from devices, keeps each device's latest position, exposes an
+authenticated REST API, and pushes authorized live updates over Socket.IO.
+
+The transport modules add guardian/admin accounts, routes/stops, approval-based
+service subscriptions, manual bKash/Rocket payments, complaints, stop requests,
+persistent in-app notifications and audit history. No payment gateway is used.
+
+## Start the transport service
+
+Requires **Node 24 or newer** (uses `node:sqlite`).
+
+```sh
+npm ci
+cp .env.example .env
+# Edit .env: set ADMIN_PHONE and a unique ADMIN_PASSWORD (12+ characters).
+npm run start:dev
+```
+
+`.env` is loaded automatically; already-exported environment variables take
+precedence. The admin is bootstrapped only when no admin exists. Guardians can
+self-register using a Bangladesh phone number and a password (8–128 characters).
+Changing ADMIN_PASSWORD later does not reset an existing account's password.
+No default admin credentials are shipped. Password reset/OTP is not implemented.
+
+The mobile app's admin **Setup** screen configures receiving wallet numbers,
+vehicles and routes. Admin **Bills** generates the chosen month's bills. A
+subsequent guardian submission is **PENDING**; the bill stays **UNPAID** until
+an admin verifies the external transfer and approves it.
+
+**Breaking access change:** `/vehicles` and `/locations` now require a bearer
+session. Vehicle mutations and setup/review endpoints require ADMIN. Existing
+other clients (including any web tracker) must be adapted to sign in and pass a
+bearer token, including `auth.token` for Socket.IO. Those projects were outside
+this change's requested two-directory scope.
+
+## Transport API
+
+All endpoints below except registration/login require
+`Authorization: Bearer <token>`. Unknown body fields are rejected.
+
+| Method | Path | Access / purpose |
+|---|---|---|
+| POST | `/auth/register` | Public: `{name,phone,password}`; creates GUARDIAN only |
+| POST | `/auth/login` | Public: `{phone,password}`; returns `{token,expiresAt,user}` |
+| GET / POST | `/auth/me` / `/auth/logout` | Inspect / revoke current session |
+| GET | `/routes` | Routes with stops and monthlyAmount |
+| POST | `/admin/routes` | Admin: `{name,vehicleId,monthlyAmount,stops:string[]}` |
+| POST | `/requests/guardian/new` | Guardian: `{studentName,routeId,stopId}` |
+| GET | `/requests/mine`, `/admin/requests` | Own applications / admin queue |
+| PATCH | `/admin/requests/:id/decision` | `{decision:"APPROVED"|"REJECTED",note?}` |
+| POST | `/admin/requests/:id/call-notes` | `{note}`; records a manual call note |
+| GET | `/subscriptions` | Own subscriptions, or all for admin |
+| GET | `/payments/accounts` | Configured admin wallet numbers |
+| PUT | `/admin/payment-accounts/:method` | BKASH/ROCKET: `{number,instructions}` |
+| POST | `/admin/bills/generate` | `{month:"YYYY-MM"}`; idempotent; no future month |
+| GET | `/payments/monthly?month=YYYY-MM` | Own bills, or all for admin; optional month |
+| POST | `/payments/submissions` | Guardian proof details; example below |
+| GET | `/payments/submissions` | Own history / admin payment review queue |
+| PATCH | `/admin/payments/:id/decision` | Admin approve/reject; rejection needs note |
+| GET / POST | `/complaints` | Own history / new `{subscriptionId,category,description}` |
+| GET | `/complaint-categories` | Supported dropdown values |
+| PATCH | `/admin/complaints/:id` | `{status:"OPEN"|"RESOLVED",note?}`; resolution needs note |
+| GET / POST | `/stop-requests` | Own history / new `{subscriptionId,reason}` |
+| PATCH | `/admin/stop-requests/:id/decision` | Admin approve/reject |
+| GET | `/notifications` | Own newest 100 notifications |
+| PATCH | `/notifications/:id/read` | Mark own notification read |
+
+Example manual payment body (**amounts are integer poisha**, not taka):
+
+```json
+{
+  "billId": "<bill UUID>",
+  "method": "BKASH",
+  "senderNumber": "01700000002",
+  "recipientNumber": "01700000001",
+  "transactionId": "ABC1234567",
+  "amount": 150000
+}
+```
+
+The receiving number must be a current or previously configured admin account.
+This preserves the actual destination if settings change after a guardian sends
+money. The exact bill amount is required. Transaction IDs are normalized and
+unique within each payment method across pending/approved submissions. Rejected
+proof stays in history and may be corrected and resubmitted. Only one pending
+submission is allowed per bill. A paid bill cannot be paid again through this API.
+
+Approval updates the submission, bill, audit record and guardian notification in
+one database transaction. Competing decisions receive HTTP 409; failure to persist
+any part rolls back the whole decision. No external SMS, calls or money transfers
+are performed by the server.
+
+## Service rules in this initial version
+
+- One guardian may request multiple students. Each student name may have one
+  pending application and one active service for that guardian. Student names
+  identify services within a guardian account in this MVP; persistent student
+  IDs and route-change workflows can be added when needed.
+- Each route has one assigned vehicle and ordered stops. One vehicle can serve
+  multiple routes. Approval rechecks route/stop coverage and vehicle existence.
+  Vehicle capacity/time schedules are not modeled.
+- Account approval is distinct from active subscription access. Only active
+  assignments can view vehicle/location data. Complaints and stop submissions
+  need an active approved service.
+- Stop approval takes effect immediately. Existing bills/receipts remain visible.
+- Bill generation is an explicit admin action. Fees are captured on subscription
+  approval. A subscription is billed its full fee for months intersecting its
+  active dates (Asia/Dhaka). No proration, refund or partial payment logic.
+- Notifications are stored transactionally and fetched by the app every 20 seconds
+  while foregrounded, on resume and pull-to-refresh. FCM background push is not
+  configured.
+- Sessions last seven days and are revocable. Passwords use salted scrypt;
+  session tokens are random and stored hashed. Login/registration are rate-limited
+  in memory. Deploy one application instance for this initial configuration.
+- Run behind HTTPS and configure `CORS_ORIGIN` for browser clients. Production
+  mobile origins proxy `/socket.io/` to port 3001 with WebSocket upgrade support;
+  REST requests go to port 3000. Keep the raw tracker TCP port separate.
+
 
 ## Architecture
 
@@ -105,8 +226,10 @@ curl -X POST http://localhost:3000/vehicles \
 
 ## Realtime
 
-Socket.IO on `SOCKET_PORT` emits `location:update` with the same
-`DeviceLocation` payload each time a device reports a valid fix.
+Socket.IO on `SOCKET_PORT` authenticates `auth: { token }` during the handshake.
+It emits `location:update` with the same `DeviceLocation` payload only to authorized
+clients. Session validity and active vehicle assignment are checked before every
+delivery, so logout, expiration and stop approval also affect existing sockets.
 
 ## Device setup
 
@@ -125,11 +248,32 @@ npm install
 npm run start:dev     # watch mode
 npm run build         # -> dist/main.js
 npm run start:prod    # node dist/main
-npm test              # protocol + coordinate unit tests
+npm test              # build + HTTP payment/access integration + GPS unit tests
 npm run typecheck
 ```
 
 ## Storage
 
-State lives in `DATA_DIR` as `devices.json` and `vehicles.json`. This is enough
-for a handful of trackers; move to a database when the device count grows.
+Transport state and vehicles live in `DATA_DIR/transport.sqlite` using foreign
+keys, unique indexes and explicit transactions (WAL mode). On first startup,
+legacy `vehicles.json` is imported once, preserving IDs/IMEIs. Invalid legacy data
+fails migration instead of silently discarding it. The source JSON is left intact.
+GPS latest-position persistence remains in `devices.json`; the protocol behavior
+is unchanged. High-frequency location history is not part of this MVP.
+
+Before upgrading, stop the old process and back up DATA_DIR. For later backups,
+stop the service and copy the full directory, including SQLite WAL/SHM files if
+present, or use SQLite's online backup facility. Do not copy a live SQLite main
+file alone. Test restoration before relying on a backup. Schema creation and the
+legacy import are versioned in the `migrations` table. Use one server process;
+a PostgreSQL migration and distributed rate limiting would be needed before
+horizontal scaling.
+
+## Verification
+
+`npm test` builds production classes and exercises the real Nest HTTP controllers
+against an isolated temporary SQLite database. Coverage includes guardian
+ownership, role escalation prevention, route coverage, duplicate/concurrent
+payments, rejected resubmission, notification failure rollback, stop revocation,
+logout, and the existing GT06 parsing/coordinate regression suite. Tests require
+permission to bind a temporary localhost HTTP port. No production data is used.

@@ -39,7 +39,7 @@ function toRawCoordinate(decimal: number): number {
 function buildPositionPayload(
   latitude: number,
   longitude: number,
-  courseStatus = 0x0400,
+  courseStatus = 0x1400,
   speed = 0,
 ): Buffer {
   const latBytes = Buffer.alloc(4);
@@ -52,8 +52,8 @@ function buildPositionPayload(
 
   return Buffer.concat([
     Buffer.from([Gt06Protocol.GPS]),
-    // BCD timestamp: 2024-08-30 10:00:00
-    Buffer.from([0x24, 0x08, 0x30, 0x10, 0x00, 0x00]),
+    // Binary timestamp: 2024-08-30 10:00:00
+    Buffer.from([24, 8, 30, 10, 0, 0]),
     Buffer.from([0xcf]),
     latBytes,
     lonBytes,
@@ -173,12 +173,63 @@ describe('gt06 payload parsing', () => {
     assert.equal(position.gpsTime, '2024-08-30 10:00:00');
   });
 
-  it('treats a cleared east bit as a western longitude', () => {
-    const payload = buildPositionPayload(23.8103, 90.4125, 0x0000);
+  // Manufacturer sections 5.2.1.4 and 5.2.1.9, example section 5.2.2:
+  // https://www.traccar.org/protocol/5023-gt06/GT06_GPS_Tracker_Communication_Protocol_v1.8.1.pdf
+  it('decodes a published GT06 payload with binary date bytes and a valid fix', () => {
+    const payload = Buffer.from(
+      '120B081D112E10CC027AC7EB0C46584900148F01CC00287D001FB80003',
+      'hex',
+    );
+    // Frame the published payload with a freshly calculated CRC; this test
+    // isolates field decoding from inconsistent checksums in protocol PDFs.
     const { frame } = findFrame(buildStandardFrame(payload));
-    const position = parsePosition(parseFrame(frame as Buffer).body);
+    assert.ok(frame);
+    const position = parsePosition(parseFrame(frame).body);
+    assert.equal(position.gpsTime, '2011-08-29 17:46:16');
+    assert.equal(position.gpsFixed, true);
+    assert.equal(position.satellites, 12);
+    assert.equal(position.course, 143);
+    assert.ok(position.latitude > 0);
+    assert.ok(position.longitude > 0);
+  });
 
-    assert.ok(position.longitude < 0);
+  for (const [flags, north, east] of [
+    [0x1400, true, true],
+    [0x1c00, true, false],
+    [0x1000, false, true],
+    [0x1800, false, false],
+  ] as const) {
+    it(`decodes hemisphere flags 0x${flags.toString(16)}`, () => {
+      const position = parsePosition(buildPositionPayload(23.8103, 90.4125, flags));
+      assert.equal(position.latitude > 0, north);
+      assert.equal(position.longitude > 0, east);
+    });
+  }
+
+  it('exposes the device fix flag even when coordinates are nonzero', () => {
+    const position = parsePosition(buildPositionPayload(23.8103, 90.4125, 0x0400));
+    assert.equal(position.gpsFixed, false);
+    assert.equal(position.satellites, 15);
+  });
+
+  it('accepts leap days and rejects invalid device calendar fields without throwing', () => {
+    const payload = buildPositionPayload(23.8103, 90.4125);
+    Buffer.from([24, 2, 29, 23, 59, 59]).copy(payload, 1);
+    assert.equal(parsePosition(payload).gpsTime, '2024-02-29 23:59:59');
+    for (const values of [
+      [26, 2, 29, 10, 0, 0],
+      [26, 2, 30, 10, 0, 0],
+      [26, 0, 1, 10, 0, 0],
+      [26, 13, 1, 10, 0, 0],
+      [26, 9, 0, 10, 0, 0],
+      [26, 9, 5, 24, 0, 0],
+      [26, 9, 5, 10, 60, 0],
+      [26, 9, 5, 10, 0, 60],
+      [100, 9, 5, 10, 0, 0],
+    ]) {
+      Buffer.from(values).copy(payload, 1);
+      assert.equal(parsePosition(payload).gpsTime, '', values.join(','));
+    }
   });
 
   it('reads modem status from a heartbeat body', () => {

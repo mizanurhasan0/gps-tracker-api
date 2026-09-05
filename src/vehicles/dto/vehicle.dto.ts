@@ -1,3 +1,5 @@
+import { Transform } from 'class-transformer';
+import { trim } from '../../auth/auth.dto';
 import {
   IsNumberString,
   IsOptional,
@@ -8,11 +10,13 @@ import {
 } from 'class-validator';
 
 export class CreateVehicleDto {
+  @Transform(trim)
   @IsString()
   @MinLength(1)
   @MaxLength(60)
   name!: string;
 
+  @Transform(trim)
   @IsString()
   @MinLength(1)
   @MaxLength(30)
@@ -23,11 +27,13 @@ export class CreateVehicleDto {
   imei!: string;
 
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MaxLength(60)
   driverName?: string;
 
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MaxLength(30)
   driverPhone?: string;
@@ -35,12 +41,14 @@ export class CreateVehicleDto {
 
 export class UpdateVehicleDto {
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MinLength(1)
   @MaxLength(60)
   name?: string;
 
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MinLength(1)
   @MaxLength(30)
@@ -52,11 +60,13 @@ export class UpdateVehicleDto {
   imei?: string;
 
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MaxLength(60)
   driverName?: string;
 
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MaxLength(30)
   driverPhone?: string;

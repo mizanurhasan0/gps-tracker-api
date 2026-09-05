@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { appConfig } from '../config/app.config';
 import { JsonStore } from '../common/json-store';
+import { HistoryIngestion } from '../history/history.ingestion';
+import { parseGpsTime } from '../history/history.math';
 import { isValidCoordinates, normalizeCoordinates } from './coordinates';
 import type {
   DeviceLocation,
@@ -16,6 +18,9 @@ export interface PositionReport {
   speed: number;
   course: number;
   gpsTime: string;
+  protocol?: number;
+  status?: number;
+  gpsFixed?: boolean;
 }
 
 export interface StatusReport {
@@ -31,6 +36,8 @@ export class LocationsService implements OnModuleInit {
     'devices.json',
   );
   private readonly devices = new Map<string, DeviceRecord>();
+
+  constructor(private readonly history: HistoryIngestion) {}
 
   onModuleInit(): void {
     for (const record of this.store.read([])) {
@@ -67,18 +74,33 @@ export class LocationsService implements OnModuleInit {
       return this.toLocation(this.touch(report.imei));
     }
 
-    const { latitude, longitude } = normalizeCoordinates(
-      report.latitude,
-      report.longitude,
-    );
+    const { latitude, longitude } =
+      report.protocol !== undefined
+        ? report
+        : normalizeCoordinates(report.latitude, report.longitude);
 
+    const receivedAt = new Date().toISOString();
+    // Synchronous durable enqueue occurs before the connection sends its ACK.
+    const gpsTime = this.history.enqueue(
+      { ...report, latitude, longitude },
+      receivedAt,
+    );
+    const previous = this.devices.get(report.imei)?.position;
+    const previousTime = previous
+      ? parseGpsTime(
+          previous.gpsTime,
+          Number(process.env.GPS_TIMEZONE_OFFSET_MINUTES ?? 0),
+        )
+      : null;
+    if (!gpsTime || (previousTime && gpsTime < previousTime))
+      return this.toLocation(this.touch(report.imei));
     const position: DevicePosition = {
       latitude,
       longitude,
       speed: report.speed,
       course: report.course,
-      gpsTime: report.gpsTime,
-      receivedAt: new Date().toISOString(),
+      gpsTime,
+      receivedAt,
     };
 
     const record: DeviceRecord = { ...this.touch(report.imei), position };
@@ -110,10 +132,10 @@ export class LocationsService implements OnModuleInit {
     const status: DeviceStatus = !online
       ? 'offline'
       : !position
-        ? 'waiting'
-        : fixIsRecent
-          ? 'live'
-          : 'lastKnown';
+      ? 'waiting'
+      : fixIsRecent
+      ? 'live'
+      : 'lastKnown';
 
     return {
       imei: record.imei,

@@ -1,8 +1,9 @@
 import {
   COORDINATE_SCALE,
   COURSE_MASK,
-  COURSE_STATUS_EAST_BIT,
-  COURSE_STATUS_SOUTH_BIT,
+  COURSE_STATUS_NORTH_BIT,
+  COURSE_STATUS_WEST_BIT,
+  COURSE_STATUS_FIX_BIT,
   EXTENDED_HEADER_SIZE,
   EXTENDED_START_BYTES,
   MIN_LOGIN_BODY_SIZE,
@@ -182,22 +183,23 @@ export function hasPosition(body: Buffer): boolean {
 }
 
 export function parsePosition(body: Buffer): Gt06Position {
-  const year = bcdToNumber(body[1]) + 2000;
-  const month = bcdToNumber(body[2]);
-  const day = bcdToNumber(body[3]);
-  const hour = bcdToNumber(body[4]);
-  const minute = bcdToNumber(body[5]);
-  const second = bcdToNumber(body[6]);
+  // Unlike the IMEI, GT06 GPS date components are unsigned binary bytes.
+  const year = body[1] + 2000;
+  const month = body[2];
+  const day = body[3];
+  const hour = body[4];
+  const minute = body[5];
+  const second = body[6];
 
   const courseStatus = body.readUInt16BE(17);
 
   let latitude = body.readUInt32BE(8) / COORDINATE_SCALE;
   let longitude = body.readUInt32BE(12) / COORDINATE_SCALE;
 
-  if (!(courseStatus & COURSE_STATUS_EAST_BIT)) {
+  if (courseStatus & COURSE_STATUS_WEST_BIT) {
     longitude = -longitude;
   }
-  if (courseStatus & COURSE_STATUS_SOUTH_BIT) {
+  if (!(courseStatus & COURSE_STATUS_NORTH_BIT)) {
     latitude = -latitude;
   }
 
@@ -207,6 +209,8 @@ export function parsePosition(body: Buffer): Gt06Position {
     speed: body[16],
     course: courseStatus & COURSE_MASK,
     status: courseStatus,
+    gpsFixed: Boolean(courseStatus & COURSE_STATUS_FIX_BIT),
+    satellites: body[7] & 0x0f,
     gpsTime: formatGpsTime(year, month, day, hour, minute, second),
   };
 }
@@ -219,6 +223,21 @@ function formatGpsTime(
   minute: number,
   second: number,
 ): string {
+  // Date.UTC normalizes impossible dates. Reject those rather than silently
+  // moving a report into another day's history. Keep invalid packets safe to
+  // parse; ingestion treats an empty device timestamp as unusable.
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    year > 2099 ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day ||
+    date.getUTCHours() !== hour ||
+    date.getUTCMinutes() !== minute ||
+    date.getUTCSeconds() !== second
+  ) {
+    return '';
+  }
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${year}-${pad(month)}-${pad(day)} ${pad(hour)}:${pad(minute)}:${pad(second)}`;
 }

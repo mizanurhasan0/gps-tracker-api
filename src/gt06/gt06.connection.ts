@@ -143,7 +143,7 @@ export class Gt06Connection {
     }
 
     const position = parsePosition(body);
-    const location = this.locations.savePosition({ imei, ...position });
+    const location = this.locations.savePosition({ imei, ...position, protocol });
 
     if (location.hasFix) {
       this.logger.log(

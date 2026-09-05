@@ -14,6 +14,7 @@ import { Gt06Connection } from './gt06.connection';
 export class Gt06Server implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(Gt06Server.name);
   private server?: Server;
+  private readonly sockets = new Set<Socket>();
 
   constructor(
     private readonly locations: LocationsService,
@@ -37,9 +38,12 @@ export class Gt06Server implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     this.server?.close();
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
   }
 
   private handleSocket(socket: Socket): void {
+    this.sockets.add(socket);
     socket.setKeepAlive(true, 30_000);
     socket.setNoDelay(true);
 
@@ -56,11 +60,19 @@ export class Gt06Server implements OnModuleInit, OnModuleDestroy {
         connection.handleData(chunk);
       } catch (error) {
         this.logger.error(
-          `Failed handling data from ${connection.deviceLabel}: ${(error as Error).message}`,
+          `Failed handling data from ${connection.deviceLabel}: ${
+            (error as Error).message
+          }`,
         );
+        // No ACK was sent for the failed frame. Reconnect permits device retry;
+        // never keep consuming a stream after durable history enqueue failed.
+        socket.destroy();
       }
     });
-    socket.on('close', () => connection.handleClose());
+    socket.on('close', () => {
+      this.sockets.delete(socket);
+      connection.handleClose();
+    });
     socket.on('error', error => connection.handleError(error));
   }
 }

@@ -1,0 +1,27 @@
+# Local development PostgreSQL. Set POSTGRES_PASSWORD before starting.
+# Production must use a dedicated non-superuser application role; see docs.
+services:
+  history-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gps_history
+      POSTGRES_DB: gps_history
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your environment}
+    ports:
+      - "127.0.0.1:${HISTORY_DB_PORT:-5432}:5432"
+    volumes:
+      - gps-history-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gps_history -d gps_history"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gps-history-data:

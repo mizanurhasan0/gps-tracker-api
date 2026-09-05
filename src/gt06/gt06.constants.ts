@@ -20,12 +20,10 @@ export const MIN_POSITION_BODY_SIZE = 19;
 /** Body must hold the protocol byte plus 8 BCD IMEI bytes */
 export const MIN_LOGIN_BODY_SIZE = 9;
 
-/**
- * CY03A and similar Concox clones invert the east/west flag: bit 10 set means
- * East, whereas the published GT06 spec uses bit 10 set for West.
- */
-export const COURSE_STATUS_EAST_BIT = 0x0400;
-export const COURSE_STATUS_SOUTH_BIT = 0x0800;
+/** GT06 protocol section 5.2.1.9: north when set, west when set. */
+export const COURSE_STATUS_NORTH_BIT = 0x0400;
+export const COURSE_STATUS_WEST_BIT = 0x0800;
+export const COURSE_STATUS_FIX_BIT = 0x1000;
 export const COURSE_MASK = 0x03ff;
 
 /** Raw coordinates arrive as minutes scaled by 30000 */

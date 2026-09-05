@@ -1,4 +1,7 @@
+import { existsSync } from 'node:fs';
 import * as path from 'path';
+
+if (existsSync('.env')) process.loadEnvFile('.env');
 
 function readNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
