@@ -9,3 +9,7 @@ export class LoginDto {
 export class RegisterDto extends LoginDto {
   @Transform(trim) @IsString() @MinLength(2) @MaxLength(80) name!: string;
 }
+
+export class UpdateProfileDto {
+  @Transform(trim) @IsString() @MinLength(2) @MaxLength(80) name!: string;
+}

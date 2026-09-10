@@ -1,6 +1,6 @@
-import { Body, Controller, Get, HttpCode, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Patch, Post, Req } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { LoginDto, RegisterDto } from './auth.dto';
+import { LoginDto, RegisterDto, UpdateProfileDto } from './auth.dto';
 import { Public } from './auth.guard';
 import { AuthRequest } from './auth.types';
 @Controller('auth')
@@ -22,6 +22,10 @@ export class AuthController {
   }
   @Get('me') me(@Req() req: AuthRequest) {
     return req.user;
+  }
+  @Patch('me')
+  updateProfile(@Body() input: UpdateProfileDto, @Req() req: AuthRequest) {
+    return this.auth.updateProfile(req.user.id, input);
   }
   @Post('logout')
   @HttpCode(204)

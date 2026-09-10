@@ -1,4 +1,4 @@
-# GPS Tracker API + PathSathi Transport
+# GPS Tracker API + Noor Transport
 
 All persistent application data uses one PostgreSQL database: accounts, sessions,
 vehicles, transport, payments, latest GPS positions and admin-only route history.
@@ -12,6 +12,10 @@ authenticated REST API, and pushes authorized live updates over Socket.IO.
 The transport modules add guardian/admin accounts, routes/stops, approval-based
 service subscriptions, manual bKash/Rocket payments, complaints, stop requests,
 persistent in-app notifications and audit history. No payment gateway is used.
+The Noor management module adds connected student/driver profiles, attendance,
+maintenance, an income/expense/investment ledger, targeted notices, requests,
+business settings, route schedules and monthly financial summaries. See
+[management API](docs/MANAGEMENT_API.md) for contracts and migration details.
 
 ## Start the transport service
 
@@ -104,11 +108,11 @@ are performed by the server.
 
 - One guardian may request multiple students. Each student name may have one
   pending application and one active service for that guardian. Student names
-  identify services within a guardian account in this MVP; persistent student
-  IDs and route-change workflows can be added when needed.
+  retain duplicate-name protection within a guardian account. Student profile IDs
+  are stable subscription IDs; admin profile editing supports route/stop changes.
 - Each route has one assigned vehicle and ordered stops. One vehicle can serve
   multiple routes. Approval rechecks route/stop coverage and vehicle existence.
-  Vehicle capacity/time schedules are not modeled.
+  Route pickup/drop schedules are editable; vehicle capacity is not modeled.
 - Account approval is distinct from active subscription access. Only active
   assignments can view vehicle/location data. Complaints and stop submissions
   need an active approved service.

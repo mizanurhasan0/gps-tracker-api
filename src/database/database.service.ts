@@ -7,6 +7,7 @@ import {
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Pool, PoolClient, QueryResultRow } from 'pg';
 import { schema } from './schema';
+import { managementSchema } from './management.schema';
 import { appConfig } from '../config/app.config';
 
 export interface MutationResult {
@@ -75,6 +76,11 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
       if (!applied.rowCount) {
         await client.query(schema);
         await client.query('INSERT INTO app_migrations(version) VALUES(1)');
+      }
+      const managementApplied = await client.query('SELECT version FROM app_migrations WHERE version = 2');
+      if (!managementApplied.rowCount) {
+        await client.query(managementSchema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(2)');
       }
       await client.query('COMMIT');
     } catch (error) {

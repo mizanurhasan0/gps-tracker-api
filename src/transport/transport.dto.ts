@@ -15,6 +15,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { trim } from '../auth/auth.dto';
+import { StudentProfileDto } from '../management/management.dto';
 export class CreateRouteDto {
   @Transform(trim) @IsString() @MinLength(2) @MaxLength(100) name!: string;
   @IsUUID() vehicleId!: string;
@@ -33,7 +34,7 @@ export class CreateRouteDto {
   @MaxLength(100, { each: true })
   stops!: string[];
 }
-export class CreateServiceRequestDto {
+export class CreateServiceRequestDto extends StudentProfileDto {
   @Transform(trim)
   @IsString()
   @MinLength(2)

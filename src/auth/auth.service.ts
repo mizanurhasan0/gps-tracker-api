@@ -14,7 +14,7 @@ import {
 } from 'node:crypto';
 import { promisify } from 'node:util';
 import { DatabaseService } from '../database/database.service';
-import { LoginDto, RegisterDto } from './auth.dto';
+import { LoginDto, RegisterDto, UpdateProfileDto } from './auth.dto';
 import { User } from './auth.types';
 const scrypt = promisify(scryptCallback);
 const publicColumns = 'id,name,phone,role,verified,"createdAt"';
@@ -130,6 +130,16 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException(
         'Your session expired. Please sign in again'
       );
+    return user;
+  }
+
+  async updateProfile(id: string, input: UpdateProfileDto): Promise<User> {
+    const user = await this.db.get<User>(
+      `UPDATE users SET name = $1 WHERE id = $2 RETURNING ${publicColumns}`,
+      input.name,
+      id
+    );
+    if (!user) throw new UnauthorizedException('Please sign in again.');
     return user;
   }
 

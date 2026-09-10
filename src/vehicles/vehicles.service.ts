@@ -38,6 +38,8 @@ export class VehiclesService {
           now,
           now
         );
+        await this.saveDetails(id,input);
+        await this.syncDriver(id,input);
         return this.findOne(id);
       });
     } catch (error) {
@@ -66,6 +68,8 @@ export class VehiclesService {
           new Date().toISOString(),
           id
         );
+        await this.saveDetails(id,input);
+        await this.syncDriver(id,input);
         return this.findOne(id);
       });
     } catch (error) {
@@ -103,5 +107,21 @@ export class VehiclesService {
   private async assertImeiAvailable(imei: string): Promise<void> {
     if (await this.db.get('SELECT id FROM vehicles WHERE imei = $1', imei))
       throw new ConflictException('IMEI is already assigned');
+  }
+  private async saveDetails(id:string,input:CreateVehicleDto|UpdateVehicleDto):Promise<void> {
+    for(const field of ['model','purchaseDate','fitnessExpiresAt','licenseExpiresAt','status'] as const) {
+      if(input[field]!==undefined && input[field]!==null)
+        await this.db.run(`UPDATE vehicles SET "${field}"=$1 WHERE id=$2`,input[field],id);
+    }
+  }
+  private async syncDriver(id:string,input:CreateVehicleDto|UpdateVehicleDto):Promise<void> {
+    if(input.driverName===undefined && input.driverPhone===undefined) return;
+    const vehicle=await this.findOne(id);
+    const assigned=await this.db.get<{id:string}>('SELECT id FROM drivers WHERE "vehicleId"=$1',id);
+    if(assigned) {
+      await this.db.run('UPDATE drivers SET name=$1,phone=$2 WHERE id=$3',vehicle.driverName??'',vehicle.driverPhone??'',assigned.id);
+    } else if(vehicle.driverName) {
+      await this.db.run('INSERT INTO drivers(id,name,phone,"vehicleId","createdAt") VALUES($1,$2,$3,$4,$5)',randomUUID(),vehicle.driverName,vehicle.driverPhone??'',id,new Date().toISOString());
+    }
   }
 }

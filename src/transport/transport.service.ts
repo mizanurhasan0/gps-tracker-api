@@ -133,6 +133,8 @@ export class TransportService {
         input.stopId,
         new Date().toISOString()
       );
+      await this.db.run(`UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7 WHERE id=$8`,
+        input.className??'',input.roll??'',input.studentCode??'',input.photoUrl??'',input.pickupAddress??'',input.dropAddress??'',input.emergencyContact??'',id);
       await this.notifications.admins(
         'New service request',
         `${user.name} requested transport for ${input.studentName}.`,
