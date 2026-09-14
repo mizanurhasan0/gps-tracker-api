@@ -11,7 +11,9 @@
     "test": "npm run build && node scripts/run-tests.cjs",
     "typecheck": "tsc --noEmit",
     "test:unit": "npm run build && node --test --import tsx test/coordinates.test.ts test/gt06.codec.test.ts test/gt06.connection.test.ts test/history.math.test.ts",
-    "migrate:legacy": "node scripts/import-legacy.cjs"
+    "migrate:legacy": "node scripts/import-legacy.cjs",
+    "deploy": "bash scripts/deploy.sh",
+    "test:deploy": "node --test test/deployment.test.cjs"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

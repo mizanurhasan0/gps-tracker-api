@@ -52,10 +52,13 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   let vehicle:Row,route:Row,student:Row,secondStudent:Row,driver:Row,maintenance:Row;
 
   await t.test('upgrades real version 1 data and backfills student and driver IDs',async()=>{
-    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2}]);
+    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3}]);
     const overview=await request('/management/overview',admin.token);
     assert.equal(overview.students[0].id,legacy.student);
     assert.equal(overview.students[0].subscriptionId,legacy.student);
+    assert.equal(overview.students[0].monthlyAmount,250000);
+    assert.equal(overview.students[0].dropoffStopId,null);
+    assert.equal((await request('/routes',admin.token))[0].fares.length,0);
     assert.equal(overview.drivers[0].vehicleId,legacy.vehicle);
     await db.ensureReady();
     assert.equal((await db.all('SELECT * FROM students')).length,1);
@@ -76,7 +79,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     vehicle=await request('/vehicles',admin.token,{name:'গাড়ি-০১',plate:'DHAKA-1234',imei:'868720065798371',model:'School van',purchaseDate:'2022-01-10',fitnessExpiresAt:'2027-01-01',licenseExpiresAt:'2027-09-01',status:'RUNNING'},'POST',201);
     assert.equal(vehicle.model,'School van');
     route=await request('/admin/routes',admin.token,{name:'Southkhan',vehicleId:vehicle.id,monthlyAmount:250000,stops:['Pickup A','Pickup B']},'POST',201);
-    await request('/admin/students',admin.token,{studentName:'Unknown guardian child',guardianPhone:'01700000999',routeId:route.id,stopId:route.stops[0].id},'POST',400);
+    await request('/admin/students',admin.token,{studentName:'Invalid guardian child',guardianPhone:'01200000999',routeId:route.id,stopId:route.stops[0].id},'POST',400);
     // Force a serialization retry after the generated IDs exist: retry must still create, not update.
     await db.exec(`CREATE SEQUENCE student_retry_once; CREATE FUNCTION student_retry_once() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF nextval('student_retry_once')=1 THEN RAISE EXCEPTION 'retry' USING ERRCODE='40001'; END IF; RETURN NEW; END; $$;

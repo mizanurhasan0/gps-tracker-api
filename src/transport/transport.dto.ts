@@ -1,4 +1,4 @@
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -13,6 +13,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
 import { trim } from '../auth/auth.dto';
 import { StudentProfileDto } from '../management/management.dto';
@@ -34,6 +35,15 @@ export class CreateRouteDto {
   @MaxLength(100, { each: true })
   stops!: string[];
 }
+export class RouteFareDto {
+  @IsUUID() boardingStopId!: string;
+  @IsUUID() dropoffStopId!: string;
+  @IsInt() @Min(1) @Max(100_000_000) monthlyAmount!: number;
+}
+export class RouteFaresDto {
+  @IsArray() @ArrayMaxSize(2450) @ValidateNested({ each: true }) @Type(() => RouteFareDto)
+  fares!: RouteFareDto[];
+}
 export class CreateServiceRequestDto extends StudentProfileDto {
   @Transform(trim)
   @IsString()
@@ -42,6 +52,7 @@ export class CreateServiceRequestDto extends StudentProfileDto {
   studentName!: string;
   @IsUUID() routeId!: string;
   @IsUUID() stopId!: string;
+  @IsOptional() @IsUUID() dropoffStopId?: string | null;
 }
 export class NoteDto {
   @Transform(trim) @IsString() @MinLength(1) @MaxLength(500) note!: string;

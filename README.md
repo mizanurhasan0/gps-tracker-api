@@ -16,6 +16,8 @@ The Noor management module adds connected student/driver profiles, attendance,
 maintenance, an income/expense/investment ledger, targeted notices, requests,
 business settings, route schedules and monthly financial summaries. See
 [management API](docs/MANAGEMENT_API.md) for contracts and migration details.
+[Boarding and destination fares](docs/ROUTE_FARES.md) configure different monthly
+charges for each student journey on the same route.
 
 ## Start the transport service
 
@@ -57,9 +59,10 @@ All endpoints below except registration/login require
 | POST | `/auth/register` | Public: `{name,phone,password}`; creates GUARDIAN only |
 | POST | `/auth/login` | Public: `{phone,password}`; returns `{token,expiresAt,user}` |
 | GET / POST | `/auth/me` / `/auth/logout` | Inspect / revoke current session |
-| GET | `/routes` | Routes with stops and monthlyAmount |
+| GET | `/routes` | Routes with ordered stops, flat monthlyAmount, and pair-specific fares |
 | POST | `/admin/routes` | Admin: `{name,vehicleId,monthlyAmount,stops:string[]}` |
-| POST | `/requests/guardian/new` | Guardian: `{studentName,routeId,stopId}` |
+| PUT | `/admin/routes/:id/fares` | Admin: `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
+| POST | `/requests/guardian/new` | Guardian: `{studentName,routeId,stopId,dropoffStopId?}`; destination required on routes with fares |
 | GET | `/requests/mine`, `/admin/requests` | Own applications / admin queue |
 | PATCH | `/admin/requests/:id/decision` | `{decision:"APPROVED"|"REJECTED",note?}` |
 | POST | `/admin/requests/:id/call-notes` | `{note}`; records a manual call note |
@@ -252,6 +255,11 @@ SERVER,0,<PUBLIC_HOST>,<TCP_PORT>,0#
 The exact string is printed in the logs at startup.
 
 ## Commands
+
+For subsequent releases to the existing VPS, commit your changes and run
+`npm run deploy`. This validates, pushes the commit, backs up the database and
+deploys that exact API revision over SSH. See [push and VPS deployment](docs/DEPLOYMENT.md)
+for connection settings, prerequisites and recovery.
 
 ```bash
 npm ci

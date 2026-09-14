@@ -10,12 +10,14 @@ import { User } from '../auth/auth.types';
 import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
+import { journeyFare } from './journey-fare';
 import {
   ComplaintDto,
   ComplaintReviewDto,
   CreateRouteDto,
   CreateServiceRequestDto,
   StopRequestDto,
+  RouteFaresDto,
 } from './transport.dto';
 interface ServiceRequest extends CreateServiceRequestDto {
   id: string;
@@ -55,9 +57,14 @@ export class TransportService {
       entries.push({ id: stop.id, name: stop.name });
       stopsByRoute.set(stop.routeId, entries);
     }
+    const fares = await this.db.all<{ routeId: string; boardingStopId: string; dropoffStopId: string; monthlyAmount: number }>(
+      `SELECT f.* FROM route_fares f JOIN stops b ON b.id=f."boardingStopId" JOIN stops d ON d.id=f."dropoffStopId"
+       ORDER BY b.position,d.position,f."boardingStopId",f."dropoffStopId"`,
+    );
     return routes.map((route) => ({
       ...route,
       stops: stopsByRoute.get(route.id) ?? [],
+      fares: fares.filter(fare => fare.routeId === route.id).map(({ routeId, ...fare }) => fare),
     }));
   }
   async createRoute(actor: User, input: CreateRouteDto) {
@@ -89,11 +96,36 @@ export class TransportService {
       return (await this.routes()).find((route) => route.id === id)!;
     });
   }
+  async saveFares(actor: User, routeId: string, input: RouteFaresDto) {
+    return this.transaction(async () => {
+      if (!(await this.db.get('SELECT id FROM routes WHERE id=$1 AND active=1', routeId)))
+        throw new NotFoundException('Active route not found');
+      const stops = await this.db.all<{ id: string }>('SELECT id FROM stops WHERE "routeId"=$1', routeId);
+      const ids = new Set(stops.map(stop => stop.id));
+      const pairs = new Set<string>();
+      for (const fare of input.fares) {
+        if (!ids.has(fare.boardingStopId) || !ids.has(fare.dropoffStopId))
+          throw new BadRequestException('Both fare stops must belong to this route');
+        if (fare.boardingStopId === fare.dropoffStopId)
+          throw new BadRequestException('Boarding and destination must be different stops');
+        const pair = `${fare.boardingStopId}:${fare.dropoffStopId}`;
+        if (pairs.has(pair)) throw new BadRequestException('Each boarding and destination pair must be unique');
+        pairs.add(pair);
+      }
+      await this.db.run('DELETE FROM route_fares WHERE "routeId"=$1', routeId);
+      for (const fare of input.fares)
+        await this.db.run('INSERT INTO route_fares("routeId","boardingStopId","dropoffStopId","monthlyAmount") VALUES($1,$2,$3,$4)',
+          routeId, fare.boardingStopId, fare.dropoffStopId, fare.monthlyAmount);
+      await this.notifications.audit(actor.id, 'ROUTE_FARES_UPDATED', routeId,
+        'Existing subscriptions and issued bills retain their assigned amounts');
+      return (await this.routes()).find(route => route.id === routeId)!;
+    });
+  }
   async requests(user: User) {
     return await this.db.all(
-      `SELECT q.*,u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",
+      `SELECT q.*,u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",
       v.name "vehicleName" FROM service_requests q JOIN users u ON u.id = q."guardianId"
-      JOIN routes r ON r.id = q."routeId" JOIN stops t ON t.id = q."stopId" JOIN vehicles v ON v.id = r."vehicleId"
+      JOIN routes r ON r.id = q."routeId" JOIN stops t ON t.id = q."stopId" LEFT JOIN stops d ON d.id = q."dropoffStopId" JOIN vehicles v ON v.id = r."vehicleId"
       WHERE ($1::text = 'ADMIN' OR q."guardianId" = $2) ORDER BY q."createdAt" DESC`,
       user.role,
       user.id
@@ -101,8 +133,8 @@ export class TransportService {
   }
   async subscriptions(user: User) {
     return await this.db.all(
-      `SELECT s.*,r.name "routeName",t.name "stopName",v.name "vehicleName",v.id "vehicleId"
-      FROM subscriptions s JOIN routes r ON r.id = s."routeId" JOIN stops t ON t.id = s."stopId" JOIN vehicles v ON v.id = r."vehicleId"
+      `SELECT s.*,r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.name "vehicleName",v.id "vehicleId"
+      FROM subscriptions s JOIN routes r ON r.id = s."routeId" JOIN stops t ON t.id = s."stopId" LEFT JOIN stops d ON d.id = s."dropoffStopId" JOIN vehicles v ON v.id = r."vehicleId"
       WHERE ($1::text = 'ADMIN' OR s."guardianId" = $2) ORDER BY s."startedAt" DESC`,
       user.role,
       user.id
@@ -110,7 +142,9 @@ export class TransportService {
   }
   async request(user: User, input: CreateServiceRequestDto) {
     return this.transaction(async () => {
-      await this.assertCoverage(input.routeId, input.stopId);
+      const monthlyAmount = await journeyFare(this.db, input.routeId, input.stopId, input.dropoffStopId);
+      if (!input.dropoffStopId && await this.db.get('SELECT 1 FROM route_fares WHERE "routeId"=$1 LIMIT 1', input.routeId))
+        throw new BadRequestException('Select a destination to use the configured journey fare');
       await this.assertNoActiveStudent(user.id, input.studentName);
       if (
         await this.db.get(
@@ -125,13 +159,15 @@ export class TransportService {
       }
       const id = randomUUID();
       await this.db.run(
-        `INSERT INTO service_requests (id,"guardianId","studentName","routeId","stopId",status,"createdAt") VALUES ($1,$2,$3,$4,$5,'PENDING',$6)`,
+        `INSERT INTO service_requests (id,"guardianId","studentName","routeId","stopId",status,"createdAt","dropoffStopId","monthlyAmount") VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8)`,
         id,
         user.id,
         input.studentName,
         input.routeId,
         input.stopId,
-        new Date().toISOString()
+        new Date().toISOString(),
+        input.dropoffStopId ?? null,
+        monthlyAmount
       );
       await this.db.run(`UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7 WHERE id=$8`,
         input.className??'',input.roll??'',input.studentCode??'',input.photoUrl??'',input.pickupAddress??'',input.dropAddress??'',input.emergencyContact??'',id);
@@ -141,7 +177,7 @@ export class TransportService {
         id
       );
       await this.notifications.audit(user.id, 'SERVICE_REQUESTED', id);
-      return { id, status: 'PENDING' };
+      return { id, status: 'PENDING', monthlyAmount };
     });
   }
   async reviewRequest(actor: User, id: string, input: DecisionDto) {
@@ -156,26 +192,25 @@ export class TransportService {
         throw new ConflictException('This request has already been reviewed');
       const now = new Date().toISOString();
       if (input.decision === 'APPROVED') {
-        const route = await this.assertCoverage(
-          request.routeId,
-          request.stopId
-        );
+        const monthlyAmount = await journeyFare(this.db, request.routeId, request.stopId, request.dropoffStopId);
         await this.assertNoActiveStudent(
           request.guardianId,
           request.studentName
         );
         await this.db.run(
-          `INSERT INTO subscriptions (id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt")
-          VALUES ($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8)`,
+          `INSERT INTO subscriptions (id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","dropoffStopId")
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9)`,
           randomUUID(),
           request.guardianId,
           id,
           request.studentName,
           request.routeId,
           request.stopId,
-          route.monthlyAmount,
-          now
+          monthlyAmount,
+          now,
+          request.dropoffStopId ?? null
         );
+        await this.db.run('UPDATE service_requests SET "monthlyAmount"=$1 WHERE id=$2', monthlyAmount, id);
         await this.db.run(
           `UPDATE users SET verified = 1 WHERE id = $1`,
           request.guardianId
@@ -417,22 +452,6 @@ export class TransportService {
         'This student already has an active transport service'
       );
     }
-  }
-  private async assertCoverage(
-    routeId: string,
-    stopId: string
-  ): Promise<Route> {
-    const route = await this.db.get<Route>(
-      `SELECT r.* FROM routes r JOIN vehicles v ON v.id = r."vehicleId"
-      JOIN stops s ON s."routeId" = r.id WHERE r.id = $1 AND s.id = $2 AND r.active = 1`,
-      routeId,
-      stopId
-    );
-    if (!route)
-      throw new BadRequestException(
-        'This stop is not covered by an active vehicle route'
-      );
-    return route;
   }
   private validateDecision(input: DecisionDto): void {
     if (input.decision === 'REJECTED' && !input.note?.trim())

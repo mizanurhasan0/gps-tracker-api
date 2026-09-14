@@ -8,8 +8,9 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | Method | Endpoint | Body / behavior |
 |---|---|---|
 | GET | `/management/overview` | `{students,drivers,attendance,maintenance,ledger,notices,requests,settings,schedules}` |
-| POST | `/admin/students` | `{studentName,guardianPhone,routeId,stopId,...profile}`; guardian account must already exist |
-| PATCH | `/admin/students/:id` | Partial student fields, route/stop, monthlyAmount, status ACTIVE/STOPPED |
+| POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
+| PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId, legacy monthlyAmount, status ACTIVE/STOPPED |
+| PUT | `/admin/routes/:id/fares` | Atomic replacement `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
 | POST / PATCH | `/admin/drivers`, `/admin/drivers/:id` | Name, phone, NID, address, joiningDate, monthlySalary, status, optional vehicleId |
 | PUT | `/admin/attendance` | `{entries:[{studentId or driverId,date,status,note?}]}`; atomic upsert, max 500 |
 | POST / PATCH | `/admin/maintenance`, `/admin/maintenance/:id` | `{vehicleId,title,description?,serviceDate,nextServiceDate?,amount,status?}` |
@@ -24,11 +25,26 @@ amounts are integer **poisha**. The matching mobile contracts are in
 Student profile fields are `studentCode,className,roll,photoUrl,pickupAddress,
 dropAddress,emergencyContact`. The existing guardian admission endpoint
 `POST /requests/guardian/new` accepts these fields alongside
-`studentName,routeId,stopId`. Ownership comes from the session. Fare comes from the
-selected route on approval. Profile data survives approval and subsequent edits.
-The admin enrollment endpoint accepts a registered guardian's phone (local or
-8801/+8801 format), and uses that account's name/phone. It does not create accounts
-with shared passwords. Guardian ownership cannot be reassigned on a student edit.
+`studentName,routeId,stopId,dropoffStopId?`. Ownership comes from the session.
+A selected destination uses the configured boarding/destination fare on approval.
+See [route fare contracts and billing rules](ROUTE_FARES.md). Profile data survives approval and subsequent edits.
+The admin enrollment endpoint accepts a guardian's phone (local or 8801/+8801
+format), normalized to the local 11-digit number. An existing guardian is reused
+without changing their name or password. A number belonging to an ADMIN returns
+409. If the number is new, an account is created with the optional `guardianName`
+(trimmed, 2–80 characters), or `Guardian <local phone>` when omitted. Its initial
+password is `password`, stored with the same salted scrypt hash as registration.
+The guardian signs in with the local phone number and this password; this initial
+release has no OTP or mandatory password change. No guardian session is issued
+during enrollment. New account creation, enrollment, profile and audit changes
+commit together or roll back together; concurrent enrollments reuse one account.
+
+Only the POST response includes `guardianAccountCreated: true` for a new account
+or `false` for an existing account. Passwords and hashes are never returned.
+`guardianName` is creation-only and does not rename existing accounts. PATCH
+cannot create a guardian, accepts no `guardianName`, and cannot reassign guardian
+ownership. Multiple students can belong to the same guardian, whose dashboard
+continues to show only their own linked students.
 Restarting a stopped service requires a new enrollment. A stopped subscription
 cannot be changed back to active, which preserves its closed billing period.
 
@@ -90,7 +106,9 @@ Migration version 2 runs after the unchanged version 1 schema, under the existin
 transaction/advisory lock. It backfills student profiles from subscriptions and
 driver profiles from vehicles. Student IDs remain the corresponding subscription
 IDs, preserving all bill/history relationships. A database trigger creates the
-profile from admission fields for every newly inserted subscription.
+profile from admission fields for every newly inserted subscription. Migration 3
+adds optional destination references and route fare tables without repricing
+existing subscriptions or bills; see [route fares](ROUTE_FARES.md).
 
 `test/management.test.ts` boots HTTP against a disposable PostgreSQL schema that
 starts with real version 1 data. It tests upgrade/backfill, enrollment/admission,

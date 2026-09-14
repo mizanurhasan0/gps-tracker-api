@@ -1,9 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { User } from '../auth/auth.types';
+import { hashPassword } from '../auth/password';
 import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
+import { journeyFare } from '../transport/journey-fare';
 import { AttendanceBatchDto, CreateDriverDto, CreateLedgerDto, CreateMaintenanceDto, CreateManagementRequestDto, CreateNoticeDto, CreateStudentDto, ScheduleDto, SettingsDto, UpdateDriverDto, UpdateMaintenanceDto, UpdateStudentDto } from './management.dto';
 
 const profileFields = ['studentCode','className','roll','photoUrl','pickupAddress','dropAddress','emergencyContact'] as const;
@@ -37,12 +39,12 @@ export class ManagementService {
   }
 
   students(user: User) {
-    return this.db.all<Row>(`SELECT p.*,s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."monthlyAmount",s.status,s."startedAt",
-      u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",v.id "vehicleId",v.name "vehicleName",
+    return this.db.all<Row>(`SELECT p.*,s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",
+      u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverName" ELSE NULL END "driverName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverPhone" ELSE NULL END "driverPhone"
       FROM students p JOIN subscriptions s ON s.id=p.id JOIN users u ON u.id=s."guardianId" JOIN routes r ON r.id=s."routeId"
-      JOIN stops t ON t.id=s."stopId" JOIN vehicles v ON v.id=r."vehicleId" WHERE $1::text='ADMIN' OR s."guardianId"=$2 ORDER BY s."studentName",s.id`,user.role,user.id);
+      JOIN stops t ON t.id=s."stopId" LEFT JOIN stops d ON d.id=s."dropoffStopId" JOIN vehicles v ON v.id=r."vehicleId" WHERE $1::text='ADMIN' OR s."guardianId"=$2 ORDER BY s."studentName",s.id`,user.role,user.id);
   }
 
   async saveStudent(actor: User, input: CreateStudentDto | UpdateStudentDto, id?: string) {
@@ -51,16 +53,39 @@ export class ManagementService {
     return this.write(async () => {
       const existing = existingId ? await this.require('subscriptions',existingId) : undefined;
       const guardianPhone = input.guardianPhone?.replace(/^(?:\+?88)/,'');
-      const guardian = guardianPhone ? await this.db.get<Row>(`SELECT id FROM users WHERE phone=$1 AND role='GUARDIAN'`,guardianPhone) : existing ? {id:existing.guardianId} : undefined;
-      if (!guardian) throw new BadRequestException('Guardian must register an account with this phone before enrollment');
+      let guardian = guardianPhone ? await this.db.get<{id:string;role:string}>('SELECT id,role FROM users WHERE phone=$1',guardianPhone) : existing ? {id:existing.guardianId,role:'GUARDIAN'} : undefined;
+      if (guardian && guardian.role !== 'GUARDIAN') throw new ConflictException('This phone number belongs to a non-guardian account');
+      if (existing && !guardian) throw new BadRequestException('Guardian ownership cannot be changed; submit a new enrollment');
+      if (!existing && !guardianPhone) throw new BadRequestException('Guardian phone is required');
+      let guardianAccountCreated = false;
+      if (!guardian) {
+        const passwordHash = await hashPassword('password');
+        // The unique phone constraint and serializable transaction retry prevent
+        // concurrent enrollments from creating or overwriting duplicate accounts.
+        guardian = await this.db.get<{id:string;role:string}>(
+          `INSERT INTO users(id,name,phone,"passwordHash",role,"createdAt")
+           VALUES($1,$2,$3,$4,'GUARDIAN',$5) ON CONFLICT(phone) DO NOTHING RETURNING id,role`,
+          randomUUID(),(input as CreateStudentDto).guardianName ?? `Guardian ${guardianPhone}`,guardianPhone,passwordHash,now()
+        );
+        guardianAccountCreated = Boolean(guardian);
+        guardian ??= await this.db.get<{id:string;role:string}>('SELECT id,role FROM users WHERE phone=$1',guardianPhone);
+        if (!guardian || guardian.role !== 'GUARDIAN') throw new ConflictException('This phone number belongs to a non-guardian account');
+      }
       if (existing && guardian.id !== existing.guardianId) throw new BadRequestException('Guardian ownership cannot be changed; submit a new enrollment');
       const routeId = input.routeId ?? existing?.routeId;
       const stopId = input.stopId ?? existing?.stopId;
-      const route = await this.coverage(routeId,stopId);
+      await this.coverage(routeId,stopId);
+      const dropoffStopId = input.dropoffStopId !== undefined ? input.dropoffStopId : existing?.dropoffStopId ?? null;
+      const journeyChanged = !existing || routeId !== existing.routeId || stopId !== existing.stopId || dropoffStopId !== existing.dropoffStopId;
+      if (dropoffStopId && (dropoffStopId === stopId || !(await this.db.get('SELECT id FROM stops WHERE id=$1 AND "routeId"=$2', dropoffStopId, routeId))))
+        throw new BadRequestException('Select a different destination on the same route');
       const studentName = input.studentName ?? existing?.studentName;
       const status = input.status ?? existing?.status ?? 'ACTIVE';
       if(existing?.status==='STOPPED' && status==='ACTIVE') throw new BadRequestException('Create a new enrollment to restart service; the stopped billing period must remain intact');
-      const amount = input.monthlyAmount ?? (existing && routeId === existing.routeId ? existing.monthlyAmount : route.monthlyAmount);
+      const assignedAmount = journeyChanged ? await journeyFare(this.db, routeId, stopId, dropoffStopId) : existing!.monthlyAmount;
+      if (dropoffStopId && input.monthlyAmount != null && input.monthlyAmount !== assignedAmount)
+        throw new BadRequestException('The monthly amount must match the assigned journey fare');
+      const amount = dropoffStopId ? assignedAmount : input.monthlyAmount ?? assignedAmount;
       if(existing && amount!==existing.monthlyAmount) {
         if(existing.status==='STOPPED') throw new BadRequestException('The fare for a stopped billing period cannot be changed');
         const unbilled=await this.db.get<{month:string}>(`SELECT to_char(m,'YYYY-MM') AS "month" FROM generate_series(
@@ -72,20 +97,21 @@ export class ManagementService {
       const timestamp = now();
       if (!existingId) {
         const requestId = randomUUID();
-        await this.db.run(`INSERT INTO service_requests(id,"guardianId","studentName","routeId","stopId",status,"createdAt","reviewedAt","reviewedBy")
-          VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$6,$7)`,requestId,guardian.id,studentName,routeId,stopId,timestamp,actor.id);
-        await this.db.run(`INSERT INTO subscriptions(id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","stoppedAt")
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,id,guardian.id,requestId,studentName,routeId,stopId,amount,status,timestamp,status==='STOPPED'?timestamp:null);
+        await this.db.run(`INSERT INTO service_requests(id,"guardianId","studentName","routeId","stopId",status,"createdAt","reviewedAt","reviewedBy","dropoffStopId","monthlyAmount")
+          VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$6,$7,$8,$9)`,requestId,guardian.id,studentName,routeId,stopId,timestamp,actor.id,dropoffStopId,amount);
+        await this.db.run(`INSERT INTO subscriptions(id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","stoppedAt","dropoffStopId")
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,id,guardian.id,requestId,studentName,routeId,stopId,amount,status,timestamp,status==='STOPPED'?timestamp:null,dropoffStopId);
         await this.db.run('UPDATE users SET verified=1 WHERE id=$1',guardian.id);
       } else {
-        await this.db.run(`UPDATE subscriptions SET "studentName"=$1,"routeId"=$2,"stopId"=$3,"monthlyAmount"=$4,status=$5,"stoppedAt"=$6 WHERE id=$7`,
-          studentName,routeId,stopId,amount,status,status==='STOPPED'?(existing?.stoppedAt??timestamp):null,id);
+        await this.db.run(`UPDATE subscriptions SET "studentName"=$1,"routeId"=$2,"stopId"=$3,"monthlyAmount"=$4,status=$5,"stoppedAt"=$6,"dropoffStopId"=$8 WHERE id=$7`,
+          studentName,routeId,stopId,amount,status,status==='STOPPED'?(existing?.stoppedAt??timestamp):null,id,dropoffStopId);
       }
       const old = await this.require('students',id);
       await this.db.run(`UPDATE students SET ${profileFields.map((f,i)=>`"${f}"=$${i+1}`).join(',')} WHERE id=$8`,...profileFields.map(f=>input[f]??old[f]??''),id);
       if(!existingId) await this.db.run(`UPDATE service_requests SET ${profileFields.map((f,i)=>`"${f}"=$${i+1}`).join(',')} WHERE id=(SELECT "requestId" FROM subscriptions WHERE id=$8)`,...profileFields.map(f=>input[f]??''),id);
       await this.notifications.audit(actor.id,existing?'STUDENT_UPDATED':'STUDENT_CREATED',id);
-      return (await this.students(actor)).find(s=>s.id===id);
+      const student = (await this.students(actor)).find(s=>s.id===id);
+      return existingId ? student : {...student,guardianAccountCreated};
     });
   }
 

@@ -16,6 +16,7 @@ import { promisify } from 'node:util';
 import { DatabaseService } from '../database/database.service';
 import { LoginDto, RegisterDto, UpdateProfileDto } from './auth.dto';
 import { User } from './auth.types';
+import { hashPassword } from './password';
 const scrypt = promisify(scryptCallback);
 const publicColumns = 'id,name,phone,role,verified,"createdAt"';
 
@@ -41,7 +42,7 @@ export class AuthService implements OnModuleInit {
         'Set ADMIN_PHONE to a Bangladesh mobile number and ADMIN_PASSWORD to at least 12 characters'
       );
     }
-    const hash = await this.hashPassword(password);
+    const hash = await hashPassword(password);
     await this.db.transaction(async () => {
       // Serialize concurrent bootstrap attempts, including different admin phones.
       await this.db.run('LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE');
@@ -81,7 +82,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async register(input: RegisterDto) {
-    const passwordHash = await this.hashPassword(input.password);
+    const passwordHash = await hashPassword(input.password);
     try {
       return await this.db.transaction(async () => {
         const id = randomUUID();
@@ -177,10 +178,5 @@ export class AuthService implements OnModuleInit {
 
   private digest(token: string): string {
     return createHash('sha256').update(token).digest('hex');
-  }
-  private async hashPassword(password: string): Promise<string> {
-    const salt = randomBytes(16).toString('hex');
-    const derived = (await scrypt(password, salt, 64)) as Buffer;
-    return `${salt}:${derived.toString('hex')}`;
   }
 }

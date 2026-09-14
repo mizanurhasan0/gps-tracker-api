@@ -7,6 +7,8 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
+ARG APP_REVISION=unknown
+LABEL org.opencontainers.image.revision=$APP_REVISION
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package*.json ./

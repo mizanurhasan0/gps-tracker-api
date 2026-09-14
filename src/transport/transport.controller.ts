@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Put, Req } from '@nestjs/common';
 import { Roles } from '../auth/auth.guard';
 import { AuthRequest } from '../auth/auth.types';
 import { DecisionDto } from '../payments/payments.dto';
@@ -8,6 +8,7 @@ import {
   CreateRouteDto,
   CreateServiceRequestDto,
   NoteDto,
+  RouteFaresDto,
   StopRequestDto,
 } from './transport.dto';
 import { TransportService } from './transport.service';
@@ -21,6 +22,11 @@ export class TransportController {
   @Post('admin/routes')
   createRoute(@Req() req: AuthRequest, @Body() input: CreateRouteDto) {
     return this.transport.createRoute(req.user, input);
+  }
+  @Roles('ADMIN')
+  @Put('admin/routes/:id/fares')
+  fares(@Req() req: AuthRequest, @Param('id', ParseUUIDPipe) id: string, @Body() input: RouteFaresDto) {
+    return this.transport.saveFares(req.user, id, input);
   }
   @Get('requests/mine') requests(@Req() req: AuthRequest) {
     return this.transport.requests(req.user);

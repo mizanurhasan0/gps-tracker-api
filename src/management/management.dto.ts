@@ -12,12 +12,14 @@ export class StudentProfileDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(30) @Matches(/^[+\d ()-]*$/) emergencyContact?: string;
 }
 export class StudentDetailsDto extends StudentProfileDto {
+  @IsOptional() @IsUUID() dropoffStopId?: string | null;
   @IsOptional() @IsInt() @Min(1) @Max(100000000) monthlyAmount?: number;
   @IsOptional() @IsIn(['ACTIVE','STOPPED']) status?: 'ACTIVE' | 'STOPPED';
 }
 export class CreateStudentDto extends StudentDetailsDto {
   @Transform(trim) @IsString() @MinLength(2) @MaxLength(100) studentName!: string;
   @Transform(trim) @IsString() @Matches(/^(?:\+?88)?01[3-9]\d{8}$/) guardianPhone!: string;
+  @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(80) guardianName?: string;
   @IsUUID() routeId!: string;
   @IsUUID() stopId!: string;
 }
