@@ -1,8 +1,12 @@
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { trim } from '../auth/auth.dto';
 
-export class StudentProfileDto {
+export class StudentScheduleDto {
+  @IsOptional() @Transform(trim) @IsString() @MinLength(1) @MaxLength(40) shiftId?: string;
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(7) @ArrayUnique() @IsInt({each:true}) @Min(0,{each:true}) @Max(6,{each:true}) operatingDays?: number[];
+}
+export class StudentProfileDto extends StudentScheduleDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(40) studentCode?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(40) className?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(20) roll?: string;
@@ -17,6 +21,7 @@ export class StudentDetailsDto extends StudentProfileDto {
   @IsOptional() @IsIn(['ACTIVE','STOPPED']) status?: 'ACTIVE' | 'STOPPED';
 }
 export class CreateStudentDto extends StudentDetailsDto {
+  @IsOptional() @IsUUID() studentId?: string;
   @Transform(trim) @IsString() @MinLength(2) @MaxLength(100) studentName!: string;
   @Transform(trim) @IsString() @Matches(/^(?:\+?88)?01[3-9]\d{8}$/) guardianPhone!: string;
   @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(80) guardianName?: string;
@@ -99,7 +104,15 @@ export class CreateManagementRequestDto {
   @Transform(trim) @IsString() @MinLength(5) @MaxLength(2000) description!: string;
   @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) @IsDateString({strict:true}) date?: string;
 }
+export class TransportShiftDto {
+  @Transform(trim) @IsString() @Matches(/^[A-Za-z0-9_-]{1,40}$/) id!: string;
+  @Transform(trim) @IsString() @MinLength(1) @MaxLength(80) name!: string;
+  @Matches(/^(?:[01]\d|2[0-3]):[0-5]\d$/) startTime!: string;
+  @Matches(/^(?:[01]\d|2[0-3]):[0-5]\d$/) endTime!: string;
+}
 export class SettingsDto {
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(7) @ArrayUnique() @IsInt({each:true}) @Min(0,{each:true}) @Max(6,{each:true}) operatingDays?: number[];
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(20) @ValidateNested({each:true}) @Type(()=>TransportShiftDto) transportShifts?: TransportShiftDto[];
   @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(120) businessName?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(30) @Matches(/^[+\d ()-]*$/) phone?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(500) address?: string;

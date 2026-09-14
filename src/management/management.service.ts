@@ -6,6 +6,7 @@ import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
 import { journeyFare } from '../transport/journey-fare';
+import { assertAvailableShift, assertScheduledAttendance, dhakaDate, overlapWarnings, resolveSchedule, resolveStudent, scheduleSettings, scheduledOn, sharedProfileFields, validateDays } from '../transport/student-schedule';
 import { AttendanceBatchDto, CreateDriverDto, CreateLedgerDto, CreateMaintenanceDto, CreateManagementRequestDto, CreateNoticeDto, CreateStudentDto, ScheduleDto, SettingsDto, UpdateDriverDto, UpdateMaintenanceDto, UpdateStudentDto } from './management.dto';
 
 const profileFields = ['studentCode','className','roll','photoUrl','pickupAddress','dropAddress','emergencyContact'] as const;
@@ -35,15 +36,17 @@ export class ManagementService {
         WHERE s."routeId"=q."routeId" AND s."guardianId"=$2 AND s.status='ACTIVE' AND r.active=1
         AND (q."studentId" IS NULL OR q."studentId"=s.id) AND (q."stopId" IS NULL OR q."stopId"=s."stopId")) ORDER BY q.period,q.position,q.id`,isAdmin,user.id),
     ]);
-    return {students,drivers,attendance,maintenance,ledger,notices,requests,settings,schedules};
+    const today = dhakaDate();
+    const scheduledStudents = students.map(student => ({...student, scheduledToday: student.status === 'ACTIVE' && scheduledOn(student.operatingDays, settings.operatingDays, today)}));
+    return {students:scheduledStudents,today,todayStudents:scheduledStudents.filter(student=>student.scheduledToday),drivers,attendance,maintenance,ledger,notices,requests,settings,schedules};
   }
 
   students(user: User) {
-    return this.db.all<Row>(`SELECT p.*,s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",
+    return this.db.all<Row>(`SELECT p.*,c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",
       u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverName" ELSE NULL END "driverName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverPhone" ELSE NULL END "driverPhone"
-      FROM students p JOIN subscriptions s ON s.id=p.id JOIN users u ON u.id=s."guardianId" JOIN routes r ON r.id=s."routeId"
+      FROM students p JOIN subscriptions s ON s.id=p.id JOIN student_profiles c ON c.id=s."studentId" JOIN users u ON u.id=s."guardianId" JOIN routes r ON r.id=s."routeId"
       JOIN stops t ON t.id=s."stopId" LEFT JOIN stops d ON d.id=s."dropoffStopId" JOIN vehicles v ON v.id=r."vehicleId" WHERE $1::text='ADMIN' OR s."guardianId"=$2 ORDER BY s."studentName",s.id`,user.role,user.id);
   }
 
@@ -79,8 +82,12 @@ export class ManagementService {
       const journeyChanged = !existing || routeId !== existing.routeId || stopId !== existing.stopId || dropoffStopId !== existing.dropoffStopId;
       if (dropoffStopId && (dropoffStopId === stopId || !(await this.db.get('SELECT id FROM stops WHERE id=$1 AND "routeId"=$2', dropoffStopId, routeId))))
         throw new BadRequestException('Select a different destination on the same route');
-      const studentName = input.studentName ?? existing?.studentName;
+      const profile = await resolveStudent(this.db, guardian.id, input.studentName ?? existing?.studentName, existing?.studentId ?? (input as CreateStudentDto).studentId);
+      const studentName = existing ? input.studentName ?? profile.studentName : profile.studentName;
+      const { shiftId, operatingDays } = await resolveSchedule(this.db, input, existing as {shiftId:string;operatingDays:number[]} | undefined);
       const status = input.status ?? existing?.status ?? 'ACTIVE';
+      if (existing && shiftId !== existing.shiftId && (existing.status === 'STOPPED' || await this.db.get('SELECT id FROM bills WHERE "subscriptionId"=$1 LIMIT 1', existingId)))
+        throw new ConflictException('This service has billing history. Stop it and add a new enrollment to change shifts');
       if(existing?.status==='STOPPED' && status==='ACTIVE') throw new BadRequestException('Create a new enrollment to restart service; the stopped billing period must remain intact');
       const assignedAmount = journeyChanged ? await journeyFare(this.db, routeId, stopId, dropoffStopId) : existing!.monthlyAmount;
       if (dropoffStopId && input.monthlyAmount != null && input.monthlyAmount !== assignedAmount)
@@ -94,24 +101,29 @@ export class ManagementService {
           WHERE NOT EXISTS(SELECT 1 FROM bills b WHERE b."subscriptionId"=$2 AND b.month=to_char(m,'YYYY-MM')) ORDER BY m LIMIT 1`,existing.startedAt,id);
         if(unbilled) throw new ConflictException(`Generate ${unbilled.month} bills before changing this fare so historical charges retain their original amount`);
       }
+      if (status === 'ACTIVE') await assertAvailableShift(this.db, profile.id, shiftId, existing?.requestId, existingId);
+      const warnings = await overlapWarnings(this.db, profile.id, shiftId, operatingDays, existingId);
       const timestamp = now();
       if (!existingId) {
         const requestId = randomUUID();
-        await this.db.run(`INSERT INTO service_requests(id,"guardianId","studentName","routeId","stopId",status,"createdAt","reviewedAt","reviewedBy","dropoffStopId","monthlyAmount")
-          VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$6,$7,$8,$9)`,requestId,guardian.id,studentName,routeId,stopId,timestamp,actor.id,dropoffStopId,amount);
-        await this.db.run(`INSERT INTO subscriptions(id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","stoppedAt","dropoffStopId")
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,id,guardian.id,requestId,studentName,routeId,stopId,amount,status,timestamp,status==='STOPPED'?timestamp:null,dropoffStopId);
+        await this.db.run(`INSERT INTO service_requests(id,"guardianId","studentName","routeId","stopId",status,"createdAt","reviewedAt","reviewedBy","dropoffStopId","monthlyAmount","studentId","shiftId","operatingDays")
+          VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$6,$7,$8,$9,$10,$11,$12)`,requestId,guardian.id,studentName,routeId,stopId,timestamp,actor.id,dropoffStopId,amount,profile.id,shiftId,operatingDays);
+        await this.db.run(`INSERT INTO subscriptions(id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","stoppedAt","dropoffStopId","studentId","shiftId","operatingDays")
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,id,guardian.id,requestId,studentName,routeId,stopId,amount,status,timestamp,status==='STOPPED'?timestamp:null,dropoffStopId,profile.id,shiftId,operatingDays);
         await this.db.run('UPDATE users SET verified=1 WHERE id=$1',guardian.id);
       } else {
-        await this.db.run(`UPDATE subscriptions SET "studentName"=$1,"routeId"=$2,"stopId"=$3,"monthlyAmount"=$4,status=$5,"stoppedAt"=$6,"dropoffStopId"=$8 WHERE id=$7`,
-          studentName,routeId,stopId,amount,status,status==='STOPPED'?(existing?.stoppedAt??timestamp):null,id,dropoffStopId);
+        await this.db.run(`UPDATE subscriptions SET "studentName"=$1,"routeId"=$2,"stopId"=$3,"monthlyAmount"=$4,status=$5,"stoppedAt"=$6,"dropoffStopId"=$8,"shiftId"=$9,"operatingDays"=$10 WHERE id=$7`,
+          studentName,routeId,stopId,amount,status,status==='STOPPED'?(existing?.stoppedAt??timestamp):null,id,dropoffStopId,shiftId,operatingDays);
       }
+      await this.db.run(`UPDATE student_profiles SET "studentName"=$1,${sharedProfileFields.map((field,i)=>`"${field}"=$${i+2}`).join(',')} WHERE id=$7`,studentName,...sharedProfileFields.map(field=>input[field]??profile[field]),profile.id);
+      await this.db.run('UPDATE subscriptions SET "studentName"=$1 WHERE "studentId"=$2',studentName,profile.id);
+      await this.db.run(`UPDATE service_requests SET "studentName"=$1,${sharedProfileFields.map((field,i)=>`"${field}"=$${i+2}`).join(',')} WHERE "studentId"=$7`,studentName,...sharedProfileFields.map(field=>input[field]??profile[field]),profile.id);
       const old = await this.require('students',id);
-      await this.db.run(`UPDATE students SET ${profileFields.map((f,i)=>`"${f}"=$${i+1}`).join(',')} WHERE id=$8`,...profileFields.map(f=>input[f]??old[f]??''),id);
+      await this.db.run(`UPDATE students SET ${profileFields.map((f,i)=>`"${f}"=$${i+1}`).join(',')} WHERE id=$8`,...profileFields.map(f=>input[f]??(sharedProfileFields.includes(f as any)?profile[f as typeof sharedProfileFields[number]]:old[f])??''),id);
       if(!existingId) await this.db.run(`UPDATE service_requests SET ${profileFields.map((f,i)=>`"${f}"=$${i+1}`).join(',')} WHERE id=(SELECT "requestId" FROM subscriptions WHERE id=$8)`,...profileFields.map(f=>input[f]??''),id);
       await this.notifications.audit(actor.id,existing?'STUDENT_UPDATED':'STUDENT_CREATED',id);
       const student = (await this.students(actor)).find(s=>s.id===id);
-      return existingId ? student : {...student,guardianAccountCreated};
+      return existingId ? {...student,warnings} : {...student,guardianAccountCreated,warnings};
     });
   }
 
@@ -149,6 +161,7 @@ export class ManagementService {
         const field=entry.studentId?'studentId':'driverId';
         const personId=entry.studentId??entry.driverId!;
         await this.require(entry.studentId?'students':'drivers',personId);
+        if (entry.studentId) await assertScheduledAttendance(this.db, personId, entry.date);
         await this.db.run(`INSERT INTO attendance(id,"${field}",date,status,note,"updatedAt","recordedBy") VALUES($1,$2,$3,$4,$5,$6,$7)
           ON CONFLICT("${field}",date) WHERE "${field}" IS NOT NULL DO UPDATE SET status=EXCLUDED.status,note=EXCLUDED.note,"updatedAt"=EXCLUDED."updatedAt","recordedBy"=EXCLUDED."recordedBy"`,
           randomUUID(),personId,entry.date,entry.status,entry.note??'',now(),actor.id);
@@ -231,6 +244,7 @@ export class ManagementService {
       if(input.category==='ABSENCE' && !input.studentId) throw new BadRequestException('Absence requires a student');
       if(input.category==='LEAVE' && !input.studentId && !input.driverId) throw new BadRequestException('Leave requires a student or driver');
       if(['ABSENCE','LEAVE'].includes(input.category) && input.studentId && input.driverId) throw new BadRequestException('Select one person for absence or leave');
+      if(input.studentId && input.date && ['ABSENCE','LEAVE'].includes(input.category)) await assertScheduledAttendance(this.db,input.studentId,input.date);
       const id=randomUUID();
       await this.db.run(`INSERT INTO management_requests(id,"userId","studentId","driverId","vehicleId",category,title,description,date,"createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         id,user.id,input.studentId??null,input.driverId??null,input.vehicleId??null,input.category,input.title,input.description,input.date??null,now());
@@ -254,10 +268,18 @@ export class ManagementService {
     });
   }
 
-  async settings() { return (await this.db.get<{data:Row}>('SELECT data FROM business_settings WHERE id=1'))!.data; }
+  async settings() { return scheduleSettings(this.db); }
   async updateSettings(actor:User,input:SettingsDto) {
     return this.write(async()=>{
-      if(Object.values(input).some(value=>value===null)) throw new BadRequestException('Settings values must be strings');
+      if(Object.values(input).some(value=>value===null)) throw new BadRequestException('Settings values cannot be null');
+      if (input.operatingDays !== undefined) validateDays(input.operatingDays);
+      if (input.transportShifts !== undefined) {
+        if (!Array.isArray(input.transportShifts) || !input.transportShifts.length || new Set(input.transportShifts.map(shift=>shift.id)).size !== input.transportShifts.length)
+          throw new BadRequestException('Configure at least one shift with unique IDs');
+        for (const shift of input.transportShifts) if (shift.startTime >= shift.endTime) throw new BadRequestException('A shift must finish after it starts on the same day');
+        const used = await this.db.all<{shiftId:string}>(`SELECT "shiftId" FROM subscriptions UNION SELECT "shiftId" FROM service_requests`);
+        if (used.some(row=>!input.transportShifts!.some(shift=>shift.id===row.shiftId))) throw new ConflictException('A shift referenced by a student or request cannot be removed');
+      }
       await this.db.run('UPDATE business_settings SET data=data || $1::jsonb WHERE id=1',JSON.stringify(input));
       await this.notifications.audit(actor.id,'SETTINGS_UPDATED',actor.id);
       return this.settings();
@@ -291,7 +313,7 @@ export class ManagementService {
         COALESCE(sum(amount) FILTER(WHERE month=$1 AND status='UNPAID'),0)::float8 due,
         COALESCE(sum(amount) FILTER(WHERE month<$1 AND status='UNPAID'),0)::float8 "previousDue" FROM bills`,month);
     const ledger=await this.db.all<Row>('SELECT * FROM ledger WHERE left(date,7)=$1 ORDER BY date DESC,"createdAt" DESC',month);
-    const students=await this.db.get<Row>(`SELECT count(*)::int total,count(*) FILTER(WHERE status='ACTIVE')::int active FROM subscriptions`);
+    const students=await this.db.get<Row>(`SELECT count(DISTINCT \"studentId\")::int total,count(DISTINCT \"studentId\") FILTER(WHERE status='ACTIVE')::int active FROM subscriptions`);
     const drivers=await this.db.get<{count:number}>('SELECT count(*)::int count FROM drivers');
     const vehicles=await this.db.get<{count:number}>('SELECT count(*)::int count FROM vehicles');
     const attendance=await this.db.get<Row>(`SELECT count(*) FILTER(WHERE status='PRESENT')::int present,count(*) FILTER(WHERE status='ABSENT')::int absent,count(*) FILTER(WHERE status='LEAVE')::int leave FROM attendance WHERE left(date,7)=$1`,month);

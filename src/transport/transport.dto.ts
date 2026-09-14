@@ -45,6 +45,7 @@ export class RouteFaresDto {
   fares!: RouteFareDto[];
 }
 export class CreateServiceRequestDto extends StudentProfileDto {
+  @IsOptional() @IsUUID() studentId?: string;
   @Transform(trim)
   @IsString()
   @MinLength(2)

@@ -91,7 +91,7 @@ export class PaymentsService {
         pendingSubmissionId: string | null;
       }
     >(
-      `SELECT b.*, s."studentName", u.name "guardianName",
+      `SELECT b.*, s."studentName",s."studentId",s."shiftId", u.name "guardianName",
       (SELECT p.id FROM payment_submissions p WHERE p."billId" = b.id AND p.status = 'PENDING') "pendingSubmissionId"
       FROM bills b JOIN subscriptions s ON s.id = b."subscriptionId" JOIN users u ON u.id = b."guardianId"
       WHERE ($1::text = 'ADMIN' OR b."guardianId" = $2) AND ($3::text IS NULL OR b.month = $4) ORDER BY b.month DESC, b."createdAt" DESC`,
@@ -111,7 +111,7 @@ export class PaymentsService {
         studentName: string;
       }
     >(
-      `SELECT p.*,u.name "guardianName",u.phone "guardianPhone",b.month,s."studentName"
+      `SELECT p.*,u.name "guardianName",u.phone "guardianPhone",b.month,s."studentName",s."studentId",s."shiftId"
       FROM payment_submissions p JOIN users u ON u.id = p."guardianId" JOIN bills b ON b.id = p."billId"
       JOIN subscriptions s ON s.id = b."subscriptionId"
       WHERE ($1::text = 'ADMIN' OR p."guardianId" = $2) ORDER BY p."createdAt" DESC`,

@@ -11,6 +11,7 @@ import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
 import { journeyFare } from './journey-fare';
+import { assertAvailableShift, resolveSchedule, resolveStudent, sharedProfileFields, overlapWarnings } from './student-schedule';
 import {
   ComplaintDto,
   ComplaintReviewDto,
@@ -123,8 +124,8 @@ export class TransportService {
   }
   async requests(user: User) {
     return await this.db.all(
-      `SELECT q.*,u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",
-      v.name "vehicleName" FROM service_requests q JOIN users u ON u.id = q."guardianId"
+      `SELECT q.*,c."studentName",c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",
+      v.name "vehicleName" FROM service_requests q JOIN student_profiles c ON c.id=q."studentId" JOIN users u ON u.id = q."guardianId"
       JOIN routes r ON r.id = q."routeId" JOIN stops t ON t.id = q."stopId" LEFT JOIN stops d ON d.id = q."dropoffStopId" JOIN vehicles v ON v.id = r."vehicleId"
       WHERE ($1::text = 'ADMIN' OR q."guardianId" = $2) ORDER BY q."createdAt" DESC`,
       user.role,
@@ -145,21 +146,16 @@ export class TransportService {
       const monthlyAmount = await journeyFare(this.db, input.routeId, input.stopId, input.dropoffStopId);
       if (!input.dropoffStopId && await this.db.get('SELECT 1 FROM route_fares WHERE "routeId"=$1 LIMIT 1', input.routeId))
         throw new BadRequestException('Select a destination to use the configured journey fare');
-      await this.assertNoActiveStudent(user.id, input.studentName);
-      if (
-        await this.db.get(
-          `SELECT id FROM service_requests WHERE "guardianId" = $1 AND "studentName" = $2 AND status = 'PENDING'`,
-          user.id,
-          input.studentName
-        )
-      ) {
-        throw new ConflictException(
-          'This student already has a pending request'
-        );
-      }
+      const profile = await resolveStudent(this.db, user.id, input.studentName, input.studentId);
+      const { shiftId, operatingDays } = await resolveSchedule(this.db, input);
+      await assertAvailableShift(this.db, profile.id, shiftId);
+      const warnings = await overlapWarnings(this.db, profile.id, shiftId, operatingDays);
+      input = { ...input, studentName: profile.studentName };
+      if (input.studentId) for (const field of sharedProfileFields) input[field] = profile[field];
+      else await this.db.run(`UPDATE student_profiles SET ${sharedProfileFields.map((field,i)=>`"${field}"=$${i+1}`).join(',')} WHERE id=$6`, ...sharedProfileFields.map(field=>input[field]??profile[field]), profile.id);
       const id = randomUUID();
       await this.db.run(
-        `INSERT INTO service_requests (id,"guardianId","studentName","routeId","stopId",status,"createdAt","dropoffStopId","monthlyAmount") VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8)`,
+        `INSERT INTO service_requests (id,"guardianId","studentName","routeId","stopId",status,"createdAt","dropoffStopId","monthlyAmount","studentId","shiftId","operatingDays") VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11)`,
         id,
         user.id,
         input.studentName,
@@ -167,7 +163,7 @@ export class TransportService {
         input.stopId,
         new Date().toISOString(),
         input.dropoffStopId ?? null,
-        monthlyAmount
+        monthlyAmount, profile.id, shiftId, operatingDays
       );
       await this.db.run(`UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7 WHERE id=$8`,
         input.className??'',input.roll??'',input.studentCode??'',input.photoUrl??'',input.pickupAddress??'',input.dropAddress??'',input.emergencyContact??'',id);
@@ -177,7 +173,7 @@ export class TransportService {
         id
       );
       await this.notifications.audit(user.id, 'SERVICE_REQUESTED', id);
-      return { id, status: 'PENDING', monthlyAmount };
+      return { id, status: 'PENDING', monthlyAmount, studentId: profile.id, shiftId, operatingDays, warnings };
     });
   }
   async reviewRequest(actor: User, id: string, input: DecisionDto) {
@@ -193,13 +189,11 @@ export class TransportService {
       const now = new Date().toISOString();
       if (input.decision === 'APPROVED') {
         const monthlyAmount = await journeyFare(this.db, request.routeId, request.stopId, request.dropoffStopId);
-        await this.assertNoActiveStudent(
-          request.guardianId,
-          request.studentName
-        );
+        await assertAvailableShift(this.db, request.studentId!, request.shiftId!, id);
+        await resolveSchedule(this.db, request);
         await this.db.run(
-          `INSERT INTO subscriptions (id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","dropoffStopId")
-          VALUES ($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9)`,
+          `INSERT INTO subscriptions (id,"guardianId","requestId","studentName","routeId","stopId","monthlyAmount",status,"startedAt","dropoffStopId","studentId","shiftId","operatingDays")
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9,$10,$11,$12)`,
           randomUUID(),
           request.guardianId,
           id,
@@ -208,9 +202,9 @@ export class TransportService {
           request.stopId,
           monthlyAmount,
           now,
-          request.dropoffStopId ?? null
+          request.dropoffStopId ?? null, request.studentId, request.shiftId, request.operatingDays
         );
-        await this.db.run('UPDATE service_requests SET "monthlyAmount"=$1 WHERE id=$2', monthlyAmount, id);
+        await this.db.run("UPDATE service_requests SET \"monthlyAmount\"=$1,status='APPROVED' WHERE id=$2", monthlyAmount, id);
         await this.db.run(
           `UPDATE users SET verified = 1 WHERE id = $1`,
           request.guardianId
@@ -414,9 +408,10 @@ export class TransportService {
         const constraint =
           'constraint' in error ? String(error.constraint) : '';
         const conflicts: Record<string, string> = {
-          pending_service: 'This student already has a pending request',
+          student_profiles_guardianId_studentName_key: 'This student already exists. Select the existing student to add a different shift',
+          pending_service: 'This student already has a pending request in this shift',
           active_student:
-            'This student already has an active transport service',
+            'This student already has an active transport service in this shift',
           pending_stop: 'A stop request is already pending',
         };
         if (conflicts[constraint])
@@ -436,22 +431,6 @@ export class TransportService {
     );
     if (!subscription)
       throw new ForbiddenException('An active, approved service is required');
-  }
-  private async assertNoActiveStudent(
-    userId: string,
-    studentName: string
-  ): Promise<void> {
-    if (
-      await this.db.get(
-        `SELECT id FROM subscriptions WHERE "guardianId" = $1 AND "studentName" = $2 AND status = 'ACTIVE'`,
-        userId,
-        studentName
-      )
-    ) {
-      throw new ConflictException(
-        'This student already has an active transport service'
-      );
-    }
   }
   private validateDecision(input: DecisionDto): void {
     if (input.decision === 'REJECTED' && !input.note?.trim())

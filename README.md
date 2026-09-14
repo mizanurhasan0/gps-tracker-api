@@ -62,7 +62,7 @@ All endpoints below except registration/login require
 | GET | `/routes` | Routes with ordered stops, flat monthlyAmount, and pair-specific fares |
 | POST | `/admin/routes` | Admin: `{name,vehicleId,monthlyAmount,stops:string[]}` |
 | PUT | `/admin/routes/:id/fares` | Admin: `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
-| POST | `/requests/guardian/new` | Guardian: `{studentName,routeId,stopId,dropoffStopId?}`; destination required on routes with fares |
+| POST | `/requests/guardian/new` | Guardian: `{studentName,studentId?,shiftId?,operatingDays?,routeId,stopId,dropoffStopId?}`; destination required on routes with fares |
 | GET | `/requests/mine`, `/admin/requests` | Own applications / admin queue |
 | PATCH | `/admin/requests/:id/decision` | `{decision:"APPROVED"|"REJECTED",note?}` |
 | POST | `/admin/requests/:id/call-notes` | `{note}`; records a manual call note |
@@ -107,12 +107,13 @@ one database transaction. Competing decisions receive HTTP 409; failure to persi
 any part rolls back the whole decision. No external SMS, calls or money transfers
 are performed by the server.
 
-## Service rules in this initial version
+## Service rules
 
-- One guardian may request multiple students. Each student name may have one
-  pending application and one active service for that guardian. Student names
-  retain duplicate-name protection within a guardian account. Student profile IDs
-  are stable subscription IDs; admin profile editing supports route/stop changes.
+- One guardian may enroll multiple students, each with multiple configured shifts.
+  A canonical `studentId` identifies the child; each enrollment retains a separate
+  subscription ID. A student may have only one pending or active service per shift,
+  regardless of route. Reuse `studentId` to add another shift. See the
+  [weekly travel and shift contract](docs/MANAGEMENT_API.md#shifts-and-weekly-travel).
 - Each route has one assigned vehicle and ordered stops. One vehicle can serve
   multiple routes. Approval rechecks route/stop coverage and vehicle existence.
   Route pickup/drop schedules are editable; vehicle capacity is not modeled.

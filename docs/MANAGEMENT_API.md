@@ -7,7 +7,7 @@ amounts are integer **poisha**. The matching mobile contracts are in
 
 | Method | Endpoint | Body / behavior |
 |---|---|---|
-| GET | `/management/overview` | `{students,drivers,attendance,maintenance,ledger,notices,requests,settings,schedules}` |
+| GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,requests,settings,schedules}` |
 | POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
 | PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId, legacy monthlyAmount, status ACTIVE/STOPPED |
 | PUT | `/admin/routes/:id/fares` | Atomic replacement `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
@@ -18,7 +18,7 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | POST | `/admin/notices` | `{title,body,category,audience,targetId?}` |
 | POST | `/management/requests` | `{studentId?,driverId?,vehicleId?,category,title,description,date?}` |
 | PATCH | `/admin/management-requests/:id/decision` | `{decision:"APPROVED" or "REJECTED",note?}`; rejection requires note |
-| PATCH | `/admin/settings` | Partial business contact information and SMS text templates |
+| PATCH | `/admin/settings` | Partial business contact information, message templates, operatingDays and transportShifts |
 | PUT | `/admin/routes/:id/schedule` | `{entries:[{label,time,period,position,stopId?,studentId?}]}`; atomic replacement |
 | GET | `/admin/reports?month=YYYY-MM` | Monthly billing, cash flow, current counts, attendance counts and ledger rows |
 
@@ -121,3 +121,52 @@ TEST_DATABASE_URL=postgresql://... npm test
 
 No production database is required for testing. Each integration suite creates
 and removes its own uniquely named schema in the explicitly provided test DB.
+
+## Shifts and weekly travel
+
+Migration 4 adds a canonical `student_profiles` record while retaining existing
+`students.id`/`subscriptionId` enrollment IDs. Existing bills, stops, vehicle access,
+route schedule targets, management request `studentId` and attendance `studentId`
+continue to reference **enrollment IDs**. The `studentId` returned on transport
+requests, subscriptions and management students is the **canonical profile ID**.
+Bills and payment submissions expose that canonical `studentId` plus `shiftId`.
+Reports count distinct canonical students, while charges remain per enrollment.
+
+Both enrollment POST endpoints accept optional `studentId`, `shiftId` and
+`operatingDays`. Pass `studentId` to add a shift to an existing student; the API
+checks guardian ownership. An omitted ID matching an existing student with a
+pending/active service returns 409, asking the caller to select that profile.
+Requests (including rejected/pending requests) expose the canonical ID so clients
+can reuse students who do not yet have an approved enrollment. Shared name,
+class, roll, student code, photo and emergency contact belong to the profile;
+pickup/drop addresses, route, fare and calendar belong to the enrollment.
+
+A student may have one pending request **or** active enrollment in each shift,
+regardless of route or selected weekdays. The database serializes claims across
+both tables, including competing guardian requests and admin enrollments. Another
+shift is allowed. Stopping one enrollment leaves the student's other shifts active.
+Shift changes on billed/stopped enrollments return 409; stop and create a new
+enrollment to preserve historical billing labels. Overlapping configured shift
+times on a common operating day return a `warnings` array when enrolling/updating.
+
+`operatingDays` is a nonempty array of unique integers: 0 Sunday through 6 Saturday.
+Omitted days on new services use institution settings; updates retain the current
+calendar when omitted. A selection must overlap at least one institution operating
+day. Effective travel days are the intersection of both calendars. Today's
+`scheduledToday` and `todayStudents` use the Asia/Dhaka date (`today`). Attendance
+and absence/leave requests are rejected on unscheduled days; existing historical
+attendance remains intact when calendars change. Driver attendance is independent.
+
+`PATCH /admin/settings` accepts `operatingDays` and `transportShifts`, an array of
+1–20 `{id,name,startTime,endTime}` entries. IDs are unique stable strings matching
+`[A-Za-z0-9_-]{1,40}`; times are `HH:mm` within the same day, with end after start.
+A referenced shift cannot be removed. Defaults are MORNING 07:00–11:00, DAY
+11:00–15:00 and EVENING 15:00–19:00. Brand-new installations exclude Friday by
+default. Upgrades preserve all seven days for existing settings and enrollments;
+an admin can explicitly set institute off days after upgrading. Migration also
+preserves previously renamed/edited student profiles and enrollment references.
+
+`test/student-shifts.test.ts` checks ownership, canonical profile reuse, duplicate
+and concurrent claims, calendar validation, attendance, overlap warnings, stopped
+service replacement and shift billing. `test/student-shifts-migration.test.ts`
+checks preservation of real version 3 profile edits, bills and attendance.
