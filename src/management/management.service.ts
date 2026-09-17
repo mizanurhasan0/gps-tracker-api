@@ -7,7 +7,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
 import { journeyFare } from '../transport/journey-fare';
 import { assertAvailableShift, assertScheduledAttendance, dhakaDate, overlapWarnings, resolveSchedule, resolveStudent, scheduleSettings, scheduledOn, sharedProfileFields, validateDays } from '../transport/student-schedule';
-import { AttendanceBatchDto, CreateDriverDto, CreateLedgerDto, CreateMaintenanceDto, CreateManagementRequestDto, CreateNoticeDto, CreateStudentDto, ScheduleDto, SettingsDto, UpdateDriverDto, UpdateMaintenanceDto, UpdateStudentDto } from './management.dto';
+import { AttendanceBatchDto, CreateBannerDto, CreateDriverDto, CreateLedgerDto, CreateMaintenanceDto, CreateManagementRequestDto, CreateNoticeDto, CreateStudentDto, ScheduleDto, SettingsDto, UpdateBannerDto, UpdateDriverDto, UpdateMaintenanceDto, UpdateStudentDto } from './management.dto';
 
 const profileFields = ['studentCode','className','roll','photoUrl','pickupAddress','dropAddress','emergencyContact'] as const;
 type Row = Record<string, any>;
@@ -20,7 +20,7 @@ export class ManagementService {
   async overview(user: User) {
     const isAdmin = user.role === 'ADMIN';
     const students = await this.students(user);
-    const [drivers, attendance, maintenance, ledger, notices, requests, settings, schedules] = await Promise.all([
+    const [drivers, attendance, maintenance, ledger, notices, banners, requests, settings, schedules] = await Promise.all([
       isAdmin ? this.drivers() : this.db.all(`SELECT d.id,d.name,d.phone,d.status,d."vehicleId",v.name "vehicleName",
         ''::text nid,''::text address,''::text "joiningDate",0 "monthlySalary",d."createdAt",NULL::text "routeName"
         FROM drivers d JOIN vehicles v ON v.id=d."vehicleId" WHERE EXISTS (SELECT 1 FROM subscriptions s
@@ -29,6 +29,7 @@ export class ManagementService {
       isAdmin ? this.maintenance() : Promise.resolve([]),
       isAdmin ? this.db.all('SELECT * FROM ledger ORDER BY date DESC,"createdAt" DESC') : Promise.resolve([]),
       this.db.all(`SELECT n.* FROM notices n WHERE $1::boolean OR EXISTS (SELECT 1 FROM notice_recipients x WHERE x."noticeId"=n.id AND x."userId"=$2) ORDER BY n."createdAt" DESC`,isAdmin,user.id),
+      this.banners(user),
       this.db.all(`SELECT q.*,u.name "userName",s."studentName" FROM management_requests q JOIN users u ON u.id=q."userId"
         LEFT JOIN subscriptions s ON s.id=q."studentId" WHERE $1::boolean OR q."userId"=$2 ORDER BY q."createdAt" DESC`,isAdmin,user.id),
       this.settings(),
@@ -38,7 +39,7 @@ export class ManagementService {
     ]);
     const today = dhakaDate();
     const scheduledStudents = students.map(student => ({...student, scheduledToday: student.status === 'ACTIVE' && scheduledOn(student.operatingDays, settings.operatingDays, today)}));
-    return {students:scheduledStudents,today,todayStudents:scheduledStudents.filter(student=>student.scheduledToday),drivers,attendance,maintenance,ledger,notices,requests,settings,schedules};
+    return {students:scheduledStudents,today,todayStudents:scheduledStudents.filter(student=>student.scheduledToday),drivers,attendance,maintenance,ledger,notices,banners,requests,settings,schedules};
   }
 
   students(user: User) {
@@ -227,6 +228,72 @@ export class ManagementService {
       }
       await this.notifications.audit(actor.id,'NOTICE_SENT',id,`${recipients.length} in-app recipients`);
       return {...await this.require('notices',id),recipientCount:recipients.length};
+    });
+  }
+
+  async banners(user: User) {
+    const isAdmin = user.role === 'ADMIN';
+    return this.db.all<Row>(
+      `SELECT id,"imageUrl","redirectRoute","sortOrder","sliderDuration",active,"createdAt","updatedAt"
+       FROM banners
+       WHERE ($1::boolean OR (active=1 AND "imageUrl" <> '' AND "redirectRoute" <> ''))
+       ORDER BY "sortOrder" ASC,"createdAt" DESC`,
+      isAdmin
+    );
+  }
+
+  private async bannerView(id: string) {
+    const banner = await this.db.get<Row>(
+      `SELECT id,"imageUrl","redirectRoute","sortOrder","sliderDuration",active,"createdAt","updatedAt"
+       FROM banners WHERE id=$1`,
+      id,
+    );
+    if (!banner) throw new NotFoundException('Banner not found');
+    return banner;
+  }
+
+  async saveBanner(actor: User, input: CreateBannerDto | UpdateBannerDto, existingId?: string) {
+    return this.write(async () => {
+      const existing = existingId ? await this.require('banners', existingId) : undefined;
+      const id = existingId ?? randomUUID();
+      const timestamp = now();
+      const values = {
+        imageUrl: input.imageUrl ?? existing?.imageUrl ?? '',
+        redirectRoute: input.redirectRoute ?? existing?.redirectRoute ?? '',
+        sortOrder: input.sortOrder ?? existing?.sortOrder ?? 0,
+        sliderDuration: input.sliderDuration === undefined
+          ? (existing?.sliderDuration ?? null)
+          : input.sliderDuration,
+        active: input.active === undefined
+          ? (existing?.active ?? 1)
+          : input.active ? 1 : 0,
+      };
+      if (existing) {
+        await this.db.run(
+          `UPDATE banners SET "imageUrl"=$1,"redirectRoute"=$2,"sortOrder"=$3,"sliderDuration"=$4,active=$5,"updatedAt"=$6
+           WHERE id=$7`,
+          values.imageUrl, values.redirectRoute, values.sortOrder, values.sliderDuration,
+          values.active, timestamp, id
+        );
+      } else {
+        await this.db.run(
+          `INSERT INTO banners(id,"imageUrl","redirectRoute","sortOrder","sliderDuration",active,"createdBy","createdAt","updatedAt")
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8)`,
+          id, values.imageUrl, values.redirectRoute, values.sortOrder,
+          values.sliderDuration, values.active, actor.id, timestamp
+        );
+      }
+      await this.notifications.audit(actor.id, existing ? 'BANNER_UPDATED' : 'BANNER_CREATED', id);
+      return this.bannerView(id);
+    });
+  }
+
+  async deleteBanner(actor: User, id: string) {
+    return this.write(async () => {
+      await this.require('banners', id);
+      await this.db.run('DELETE FROM banners WHERE id=$1', id);
+      await this.notifications.audit(actor.id, 'BANNER_DELETED', id);
+      return { id };
     });
   }
 

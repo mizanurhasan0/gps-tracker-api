@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { trim } from '../auth/auth.dto';
 
 export class StudentScheduleDto {
@@ -94,6 +94,27 @@ export class CreateNoticeDto {
   @Transform(trim) @IsString() @MinLength(1) @MaxLength(60) category!: string;
   @IsIn(['ALL','ROUTE','VEHICLE','STUDENT']) audience!: 'ALL' | 'ROUTE' | 'VEHICLE' | 'STUDENT';
   @IsOptional() @IsUUID() targetId?: string;
+}
+const bannerImage = /^(?:https:\/\/[^\s]+|data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2})$/;
+export const bannerRoutes = [
+  'Fleet', 'Vehicles', 'FleetMap', 'Routes', 'Bills', 'DueList',
+  'Requested', 'Complaints', 'StopRequests', 'PaymentAccounts', 'Inbox',
+  'Settings', 'Emergency', 'LiveTracking',
+] as const;
+export type BannerRoute = (typeof bannerRoutes)[number];
+export class CreateBannerDto {
+  @IsString() @MaxLength(450000) @Matches(bannerImage) imageUrl!: string;
+  @Transform(trim) @IsString() @IsIn(bannerRoutes) redirectRoute!: BannerRoute;
+  @IsOptional() @IsInt() @Min(0) @Max(10000) sortOrder?: number;
+  @IsOptional() @IsInt() @Min(1) @Max(60) sliderDuration?: number | null;
+  @IsOptional() @IsBoolean() active?: boolean;
+}
+export class UpdateBannerDto {
+  @IsOptional() @IsString() @MaxLength(450000) @Matches(bannerImage) imageUrl?: string;
+  @IsOptional() @Transform(trim) @IsString() @IsIn(bannerRoutes) redirectRoute?: BannerRoute;
+  @IsOptional() @IsInt() @Min(0) @Max(10000) sortOrder?: number;
+  @IsOptional() @IsInt() @Min(1) @Max(60) sliderDuration?: number | null;
+  @IsOptional() @IsBoolean() active?: boolean;
 }
 export class CreateManagementRequestDto {
   @IsOptional() @IsUUID() studentId?: string;

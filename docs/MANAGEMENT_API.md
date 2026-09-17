@@ -7,7 +7,7 @@ amounts are integer **poisha**. The matching mobile contracts are in
 
 | Method | Endpoint | Body / behavior |
 |---|---|---|
-| GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,requests,settings,schedules}` |
+| GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,banners,requests,settings,schedules}`; guardians receive published image banners, while admins also receive hidden banners for management |
 | POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
 | PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId, legacy monthlyAmount, status ACTIVE/STOPPED |
 | PUT | `/admin/routes/:id/fares` | Atomic replacement `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
@@ -16,6 +16,7 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | POST / PATCH | `/admin/maintenance`, `/admin/maintenance/:id` | `{vehicleId,title,description?,serviceDate,nextServiceDate?,amount,status?}` |
 | POST | `/admin/ledger` | `{type,category,title,amount,date,note?,vehicleId?,driverId?}` |
 | POST | `/admin/notices` | `{title,body,category,audience,targetId?}` |
+| POST / PATCH / DELETE | `/admin/banners`, `/admin/banners/:id` | Admin-managed image cards; `{imageUrl,redirectRoute,sortOrder?,sliderDuration?,active?}`. `redirectRoute` is an allowed in-app route; `sliderDuration` is optional seconds (1-60, default 5). |
 | POST | `/management/requests` | `{studentId?,driverId?,vehicleId?,category,title,description,date?}` |
 | PATCH | `/admin/management-requests/:id/decision` | `{decision:"APPROVED" or "REJECTED",note?}`; rejection requires note |
 | PATCH | `/admin/settings` | Partial business contact information, message templates, operatingDays and transportShifts |

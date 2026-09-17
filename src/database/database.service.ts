@@ -10,6 +10,9 @@ import { schema } from './schema';
 import { managementSchema } from './management.schema';
 import { faresSchema } from './fares.schema';
 import { shiftsSchema } from './shifts.schema';
+import { bannersSchema } from './banners.schema';
+import { bannerLinksSchema } from './banner-links.schema';
+import { bannerRoutesSchema } from './banner-routes.schema';
 import { appConfig } from '../config/app.config';
 
 export interface MutationResult {
@@ -95,6 +98,21 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
         const legacyData = await client.query('SELECT 1 FROM users LIMIT 1');
         if (!applied.rowCount && !legacyData.rowCount) await client.query("UPDATE business_settings SET data=jsonb_set(data,'{operatingDays}','[0,1,2,3,4,6]') WHERE id=1");
         await client.query('INSERT INTO app_migrations(version) VALUES(4)');
+      }
+      const bannersApplied = await client.query('SELECT version FROM app_migrations WHERE version = 5');
+      if (!bannersApplied.rowCount) {
+        await client.query(bannersSchema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(5)');
+      }
+      const bannerLinksApplied = await client.query('SELECT version FROM app_migrations WHERE version = 6');
+      if (!bannerLinksApplied.rowCount) {
+        await client.query(bannerLinksSchema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(6)');
+      }
+      const bannerRoutesApplied = await client.query('SELECT version FROM app_migrations WHERE version = 7');
+      if (!bannerRoutesApplied.rowCount) {
+        await client.query(bannerRoutesSchema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(7)');
       }
       await client.query('COMMIT');
     } catch (error) {

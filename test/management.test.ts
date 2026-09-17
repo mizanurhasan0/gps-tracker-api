@@ -52,7 +52,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   let vehicle:Row,route:Row,student:Row,secondStudent:Row,driver:Row,maintenance:Row;
 
   await t.test('upgrades real version 1 data and backfills student and driver IDs',async()=>{
-    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4}]);
+    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7}]);
     const migratedService=await db.get('SELECT * FROM subscriptions WHERE id=$1',legacy.student);
     assert.equal(migratedService.shiftId,'MORNING');
     assert.deepEqual(migratedService.operatingDays,[0,1,2,3,4,5,6]);
@@ -70,7 +70,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   });
   await t.test('requires authentication, admin writes, valid dates and validated payloads',async()=>{
     await request('/management/overview',undefined,undefined,'GET',401);
-    for(const path of ['/admin/students','/admin/drivers','/admin/ledger','/admin/notices','/admin/maintenance'])
+    for(const path of ['/admin/students','/admin/drivers','/admin/ledger','/admin/notices','/admin/banners','/admin/maintenance'])
       await request(path,guardian.token,{},'POST',403);
     await request('/admin/settings',guardian.token,{},'PATCH',403);
     await request('/admin/reports?month=2026-13',admin.token,undefined,'GET',400);
@@ -168,6 +168,22 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     assert.equal((await request('/management/overview',other.token)).notices.length,0);
     assert.ok((await request('/notifications',guardian.token)).some((n:Row)=>n.entityId===notice.id));
     await request('/admin/notices',admin.token,{title:'Bad target',body:'Wrong target',category:'OTHER',audience:'ROUTE',targetId:student.id},'POST',404);
+  });
+  await t.test('admin banners support publishing, targeting, ordering and full CRUD',async()=>{
+    const defaults=(await request('/management/overview',admin.token)).banners;
+    assert.equal(defaults.length,3);
+    const banner=await request('/admin/banners',admin.token,{
+      imageUrl:'https://example.com/banner.png',redirectRoute:'Bills',
+      sortOrder:5,sliderDuration:8,active:true
+    },'POST',201);
+    assert.equal(banner.redirectRoute,'Bills');assert.equal(banner.sliderDuration,8);assert.equal(banner.sortOrder,5);assert.equal(banner.active,1);
+    assert.ok((await request('/management/overview',guardian.token)).banners.some((item:Row)=>item.id===banner.id));
+    const hidden=await request('/admin/banners/' + banner.id,admin.token,{active:false,redirectRoute:'LiveTracking'},'PATCH');
+    assert.equal(hidden.redirectRoute,'LiveTracking');assert.equal(hidden.active,0);
+    assert.ok((await request('/management/overview',admin.token)).banners.some((item:Row)=>item.id===banner.id));
+    assert.ok(!(await request('/management/overview',guardian.token)).banners.some((item:Row)=>item.id===banner.id));
+    await request('/admin/banners/' + banner.id,admin.token,undefined,'DELETE',200);
+    await request('/admin/banners/' + banner.id,admin.token,undefined,'DELETE',404);
   });
   await t.test('requests enforce guardian ownership and approved absence records attendance',async()=>{
     await request('/management/requests',other.token,{studentId:student.id,category:'ABSENCE',title:'Absence',description:'Away for one day',date:'2026-09-11'},'POST',403);
