@@ -13,6 +13,7 @@ import { shiftsSchema } from './shifts.schema';
 import { bannersSchema } from './banners.schema';
 import { bannerLinksSchema } from './banner-links.schema';
 import { bannerRoutesSchema } from './banner-routes.schema';
+import { telegramSchema } from './telegram.schema';
 import { appConfig } from '../config/app.config';
 
 export interface MutationResult {
@@ -113,6 +114,11 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
       if (!bannerRoutesApplied.rowCount) {
         await client.query(bannerRoutesSchema);
         await client.query('INSERT INTO app_migrations(version) VALUES(7)');
+      }
+      const telegramApplied = await client.query('SELECT version FROM app_migrations WHERE version = 8');
+      if (!telegramApplied.rowCount) {
+        await client.query(telegramSchema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(8)');
       }
       await client.query('COMMIT');
     } catch (error) {

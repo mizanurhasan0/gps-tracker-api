@@ -1,4 +1,5 @@
 import { Controller, Get, HttpCode, Param, Patch, Req } from '@nestjs/common';
+import { Roles } from '../auth/auth.guard';
 import { AuthRequest } from '../auth/auth.types';
 import { NotificationsService } from './notifications.service';
 @Controller('notifications')
@@ -11,5 +12,10 @@ export class NotificationsController {
   @HttpCode(204)
   read(@Req() req: AuthRequest, @Param('id') id: string) {
     return this.notifications.read(req.user.id, id);
+  }
+  @Roles('ADMIN')
+  @Get('admin/telegram-deliveries')
+  telegramDeliveries() {
+    return this.notifications.listTelegramDeliveries();
   }
 }

@@ -9,6 +9,7 @@ import {
   CreateServiceRequestDto,
   NoteDto,
   RouteFaresDto,
+  PickupPointDto,
   StopRequestDto,
 } from './transport.dto';
 import { TransportService } from './transport.service';
@@ -27,6 +28,15 @@ export class TransportController {
   @Put('admin/routes/:id/fares')
   fares(@Req() req: AuthRequest, @Param('id', ParseUUIDPipe) id: string, @Body() input: RouteFaresDto) {
     return this.transport.saveFares(req.user, id, input);
+  }
+  @Roles('ADMIN')
+  @Put('admin/stops/:id/pickup-point')
+  pickupPoint(
+    @Req() req: AuthRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() input: PickupPointDto,
+  ) {
+    return this.transport.savePickupPoint(req.user, id, input);
   }
   @Get('requests/mine') requests(@Req() req: AuthRequest) {
     return this.transport.requests(req.user);

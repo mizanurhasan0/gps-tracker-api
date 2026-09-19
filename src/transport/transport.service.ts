@@ -19,6 +19,7 @@ import {
   CreateServiceRequestDto,
   StopRequestDto,
   RouteFaresDto,
+  PickupPointDto,
 } from './transport.dto';
 interface ServiceRequest extends CreateServiceRequestDto {
   id: string;
@@ -51,11 +52,35 @@ export class TransportService {
       id: string;
       name: string;
       routeId: string;
-    }>(`SELECT id,name,"routeId" FROM stops ORDER BY position,id`);
-    const stopsByRoute = new Map<string, { id: string; name: string }[]>();
+      latitude: number | null;
+      longitude: number | null;
+      enterRadiusMeters: number | null;
+      exitRadiusMeters: number | null;
+    }>(`SELECT s.id,s.name,s."routeId",p.latitude,p.longitude,
+          p."enterRadiusMeters",p."exitRadiusMeters"
+       FROM stops s LEFT JOIN pickup_points p ON p."stopId"=s.id
+       ORDER BY s.position,s.id`);
+    const stopsByRoute = new Map<string, {
+      id: string;
+      name: string;
+      pickupPoint?: { latitude: number; longitude: number; enterRadiusMeters: number; exitRadiusMeters: number };
+    }[]>();
     for (const stop of stops) {
       const entries = stopsByRoute.get(stop.routeId) ?? [];
-      entries.push({ id: stop.id, name: stop.name });
+      entries.push({
+        id: stop.id,
+        name: stop.name,
+        ...(stop.latitude !== null && stop.longitude !== null
+          ? {
+              pickupPoint: {
+                latitude: stop.latitude,
+                longitude: stop.longitude,
+                enterRadiusMeters: stop.enterRadiusMeters ?? 100,
+                exitRadiusMeters: stop.exitRadiusMeters ?? 150,
+              },
+            }
+          : {}),
+      });
       stopsByRoute.set(stop.routeId, entries);
     }
     const fares = await this.db.all<{ routeId: string; boardingStopId: string; dropoffStopId: string; monthlyAmount: number }>(
@@ -67,6 +92,39 @@ export class TransportService {
       stops: stopsByRoute.get(route.id) ?? [],
       fares: fares.filter(fare => fare.routeId === route.id).map(({ routeId, ...fare }) => fare),
     }));
+  }
+
+  async savePickupPoint(actor: User, stopId: string, input: PickupPointDto) {
+    if ((input.exitRadiusMeters ?? 150) <= (input.enterRadiusMeters ?? 100))
+      throw new BadRequestException('Exit radius must be greater than enter radius');
+    const stop = await this.db.get<{ id: string; routeId: string }>(
+      'SELECT id,"routeId" FROM stops WHERE id=$1',
+      stopId,
+    );
+    if (!stop) throw new NotFoundException('Pickup stop not found');
+    await this.db.run(
+      `INSERT INTO pickup_points
+        (id,"stopId",latitude,longitude,"enterRadiusMeters","exitRadiusMeters",active,"updatedAt")
+       VALUES ($1,$2,$3,$4,$5,$6,TRUE,now())
+       ON CONFLICT ("stopId") DO UPDATE SET latitude=EXCLUDED.latitude,
+         longitude=EXCLUDED.longitude,"enterRadiusMeters"=EXCLUDED."enterRadiusMeters",
+         "exitRadiusMeters"=EXCLUDED."exitRadiusMeters",active=TRUE,"updatedAt"=now()`,
+      randomUUID(),
+      stopId,
+      input.latitude,
+      input.longitude,
+      input.enterRadiusMeters ?? 100,
+      input.exitRadiusMeters ?? 150,
+    );
+    await this.notifications.audit(actor.id, 'PICKUP_POINT_UPDATED', stopId);
+    return {
+      stopId,
+      routeId: stop.routeId,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      enterRadiusMeters: input.enterRadiusMeters ?? 100,
+      exitRadiusMeters: input.exitRadiusMeters ?? 150,
+    };
   }
   async createRoute(actor: User, input: CreateRouteDto) {
     return this.transaction(async () => {

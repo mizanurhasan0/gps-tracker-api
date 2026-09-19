@@ -8,6 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsNumber,
   IsUUID,
   Max,
   MaxLength,
@@ -43,6 +44,13 @@ export class RouteFareDto {
 export class RouteFaresDto {
   @IsArray() @ArrayMaxSize(2450) @ValidateNested({ each: true }) @Type(() => RouteFareDto)
   fares!: RouteFareDto[];
+}
+
+export class PickupPointDto {
+  @IsNumber() @Min(-90) @Max(90) latitude!: number;
+  @IsNumber() @Min(-180) @Max(180) longitude!: number;
+  @IsOptional() @IsInt() @Min(10) @Max(10000) enterRadiusMeters?: number;
+  @IsOptional() @IsInt() @Min(11) @Max(20000) exitRadiusMeters?: number;
 }
 export class CreateServiceRequestDto extends StudentProfileDto {
   @IsOptional() @IsUUID() studentId?: string;

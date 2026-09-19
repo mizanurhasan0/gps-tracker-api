@@ -11,6 +11,24 @@ export interface DevicePosition {
   receivedAt: string;
 }
 
+/**
+ * Immutable input for post-commit consumers such as geofence evaluation.
+ * This deliberately contains only a valid, newest device fix.
+ */
+export interface SavedPosition {
+  imei: string;
+  latitude: number;
+  longitude: number;
+  speed: number;
+  course: number;
+  gpsTime: string;
+  receivedAt: string;
+}
+
+export type PositionEvaluationHook = (
+  position: SavedPosition,
+) => void | Promise<void>;
+
 /** Persisted shape: device status plus its most recent valid fix */
 export interface DeviceRecord {
   imei: string;

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { appConfig } from '../config/app.config';
 import { DatabaseService } from '../database/database.service';
 import { HistoryIngestion } from '../history/history.ingestion';
@@ -8,6 +8,8 @@ import type {
   DeviceLocation,
   DeviceRecord,
   DeviceStatus,
+  PositionEvaluationHook,
+  SavedPosition,
 } from './location.types';
 
 export interface PositionReport {
@@ -29,10 +31,26 @@ export interface StatusReport {
 
 @Injectable()
 export class LocationsService {
+  private readonly logger = new Logger(LocationsService.name);
+  private readonly positionEvaluationHooks = new Set<PositionEvaluationHook>();
+
   constructor(
     private readonly history: HistoryIngestion,
     private readonly db: DatabaseService
   ) {}
+
+  /**
+   * Register a post-commit consumer, such as the geofence service.
+   *
+   * The callback runs after the latest position transaction commits and is
+   * intentionally detached from the tracker request. A callback failure
+   * therefore cannot roll back the position or delay the GT06 ACK.
+   * Returns an unregister function for module shutdown and test isolation.
+   */
+  registerPositionEvaluationHook(hook: PositionEvaluationHook): () => void {
+    this.positionEvaluationHooks.add(hook);
+    return () => this.positionEvaluationHooks.delete(hook);
+  }
 
   /** Persist modem contact using the same database as business data and history. */
   async touch(imei: string, status: StatusReport = {}): Promise<DeviceRecord> {
@@ -59,7 +77,7 @@ export class LocationsService {
         ? report
         : normalizeCoordinates(report.latitude, report.longitude);
     const receivedAt = new Date().toISOString();
-    return this.db.transaction(async () => {
+    const result = await this.db.transaction(async () => {
       const existing = await this.lockRecord(report.imei);
       const gpsTime = await this.history.record(
         { ...report, latitude, longitude },
@@ -77,6 +95,7 @@ export class LocationsService {
         imei: report.imei,
         lastSeen: receivedAt,
       };
+      let savedPosition: SavedPosition | undefined;
       // Invalid, delayed and retransmitted fixes must not refresh or regress the latest position.
       if (gpsTime && (!previousTime || gpsTime > previousTime)) {
         record.position = {
@@ -87,10 +106,16 @@ export class LocationsService {
           gpsTime,
           receivedAt,
         };
+        savedPosition = { ...record.position, imei: report.imei };
       }
       await this.persist(record);
-      return this.toLocation(record);
+      return { location: this.toLocation(record), savedPosition };
     });
+
+    if (result.savedPosition) {
+      this.emitPositionEvaluation(result.savedPosition);
+    }
+    return result.location;
   }
 
   async findAll(): Promise<DeviceLocation[]> {
@@ -129,6 +154,19 @@ export class LocationsService {
       record.imei,
       JSON.stringify(record)
     );
+  }
+
+  private emitPositionEvaluation(position: SavedPosition): void {
+    for (const hook of this.positionEvaluationHooks) {
+      void Promise.resolve()
+        .then(() => hook(position))
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Position evaluation failed for ${position.imei}: ${message}`,
+          );
+        });
+    }
   }
 
   private toLocation(record: DeviceRecord): DeviceLocation {

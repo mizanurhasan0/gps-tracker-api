@@ -6,6 +6,8 @@ import { HealthController } from './health/health.controller';
 import { LocationsModule } from './locations/locations.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
+import { TelegramModule } from './telegram/telegram.module';
+import { GeofenceCoordinator } from './geofence/geofence.coordinator';
 
 @Module({
   imports: [
@@ -15,7 +17,9 @@ import { VehiclesModule } from './vehicles/vehicles.module';
     VehiclesModule,
     RealtimeModule,
     Gt06Module,
+    TelegramModule,
   ],
   controllers: [HealthController],
+  providers: [GeofenceCoordinator],
 })
 export class AppModule {}

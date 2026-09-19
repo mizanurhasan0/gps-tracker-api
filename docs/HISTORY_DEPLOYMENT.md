@@ -44,6 +44,44 @@ Set `ADMIN_PHONE`, a unique `ADMIN_PASSWORD` of at least 12 characters,
 old release. Do not commit this file or print resolved Compose configuration with
 real credentials. Admin bootstrap runs only if there is no existing admin.
 
+### Configure Telegram notifications
+
+Telegram is optional and remains disabled with the example defaults. To enable it
+on a production deployment, create a bot with BotFather and put the following in
+the private VPS `.env`:
+
+```dotenv
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=REPLACE_WITH_BOTFATHER_TOKEN
+TELEGRAM_BOT_USERNAME=your_bot_username
+TELEGRAM_WEBHOOK_SECRET=REPLACE_WITH_A_RANDOM_SECRET
+TELEGRAM_WEBHOOK_URL=https://api.example.com/telegram/webhook
+TELEGRAM_GEOFENCE_RADIUS_METERS=100
+TELEGRAM_GEOFENCE_TIME_WINDOW_MINUTES=15
+```
+
+Use a random webhook secret containing only letters, numbers, `_` or `-`; keep it
+private. `TELEGRAM_WEBHOOK_URL` must be publicly reachable over HTTPS and must be
+routed by the reverse proxy to the API's Telegram webhook endpoint. The API
+validates all required values during startup, so a typo or missing value prevents
+an incorrectly configured Telegram worker from starting. The geofence radius is
+limited to 10–1000 metres and the time window to 1–1440 minutes.
+
+After editing the private `.env`, deploy the API normally. Never include the bot
+token, webhook secret or resolved Compose output in a commit or support log.
+
+After the HTTPS API is healthy, register the webhook once from the VPS. Keep the
+token out of shell history where possible:
+
+```bash
+curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  -H 'content-type: application/json' \
+  -d "{\"url\":\"${TELEGRAM_WEBHOOK_URL}\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\",\"allowed_updates\":[\"message\"]}"
+```
+
+The response must contain `"ok":true`. Delete or replace the webhook when the
+public API URL or bot changes.
+
 `compose.yml` constructs the API connection URL using `postgres` as its database
 hostname. The `.env` `DATABASE_URL` is used only for host-run tools/API, where the
 host is `127.0.0.1` and the password must match `APP_DB_PASSWORD`:

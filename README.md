@@ -176,6 +176,21 @@ SQLite/JSON files are never imported automatically.
 | `CORS_ORIGIN` | `*` | Allowed origin for REST and Socket.IO |
 | `DATABASE_URL` | required | PostgreSQL connection URL for all persistent data |
 | `GPS_TIMEZONE_OFFSET_MINUTES` | `0` | Tracker clock offset; independent of display timezone |
+| `TELEGRAM_ENABLED` | `false` | Enables Telegram delivery and webhook handling |
+| `TELEGRAM_BOT_TOKEN` | empty | Secret token issued by BotFather; required when enabled |
+| `TELEGRAM_BOT_USERNAME` | empty | Bot username, with or without the leading `@` |
+| `TELEGRAM_WEBHOOK_SECRET` | empty | Secret Telegram webhook header value; required when enabled |
+| `TELEGRAM_WEBHOOK_URL` | empty | Public HTTPS URL for the Telegram webhook; required when enabled |
+| `TELEGRAM_GEOFENCE_RADIUS_METERS` | `100` | Pickup proximity radius, from 10 to 1000 metres |
+| `TELEGRAM_GEOFENCE_TIME_WINDOW_MINUTES` | `15` | Pickup schedule window, from 1 to 1440 minutes |
+
+Telegram is disabled by default. When enabled, the API validates that the bot
+token, bot username, webhook secret and public HTTPS webhook URL are all present;
+an invalid configuration stops startup with the missing or invalid variable name.
+The bot token and webhook secret must never be committed or printed in logs.
+The webhook URL should route to the Telegram module's `/telegram/webhook` endpoint
+through the production HTTPS proxy. The radius and time window are read by the
+pickup alert/geofence implementation; they do not change tracker online status.
 
 ## API
 
