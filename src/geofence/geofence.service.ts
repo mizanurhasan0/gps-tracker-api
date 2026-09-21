@@ -54,10 +54,18 @@ export class GeofenceService {
     if (
       stop.routeId !== input.routeId ||
       stop.stopId !== input.stopId ||
+      !stop.pickupPointId ||
       !isValidGeoCoordinate(stop)
     ) {
       throw new RangeError('Route-stop lookup returned an invalid coordinate');
     }
+
+    const config = normalizeConfig({
+      enterRadiusMeters:
+        stop.enterRadiusMeters ?? this.config.enterRadiusMeters,
+      exitRadiusMeters:
+        stop.exitRadiusMeters ?? this.config.exitRadiusMeters,
+    });
 
     const distanceMeters = haversineDistanceMeters(
       input.vehiclePosition,
@@ -67,7 +75,7 @@ export class GeofenceService {
     const transition = transitionForDistance(
       state.phase,
       distanceMeters,
-      this.config,
+      config,
     );
 
     if (transition === 'enter') {

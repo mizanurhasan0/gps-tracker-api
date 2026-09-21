@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { after, test } from 'node:test';
-import { ExecutionContext, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { AuthService } from '../src/auth/auth.service';
 import { AuthGuard } from '../src/auth/auth.guard';
@@ -77,19 +77,17 @@ function configureTelegramEnvironment(): Record<string, string | undefined> {
   const keys = [
     'TELEGRAM_BOT_TOKEN',
     'TELEGRAM_BOT_USERNAME',
-    'TELEGRAM_WEBHOOK_SECRET',
     'TELEGRAM_API_BASE_URL',
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   process.env.TELEGRAM_BOT_TOKEN = '123456:unit-test-token';
   process.env.TELEGRAM_BOT_USERNAME = 'test_vehicle_bot';
-  process.env.TELEGRAM_WEBHOOK_SECRET = 'unit-test-secret';
   process.env.TELEGRAM_API_BASE_URL = 'https://telegram.test';
   Object.assign(appConfig.telegram as unknown as Record<string, unknown>, {
     enabled: true,
     botToken: process.env.TELEGRAM_BOT_TOKEN,
     botUsername: process.env.TELEGRAM_BOT_USERNAME,
-    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
+    pollingTimeoutSeconds: 1,
   });
   return previous;
 }
@@ -128,14 +126,7 @@ test('Telegram connect links store only a digest of the one-time token', async (
   assert.ok(Date.parse(result.expiresAt) > Date.now());
 });
 
-test('Telegram webhook secret rejects missing and incorrect secrets', () => {
-  const service = new TelegramService(telegramDb() as never);
-  assert.throws(() => service.verifyWebhookSecret(undefined), UnauthorizedException);
-  assert.throws(() => service.verifyWebhookSecret('wrong-secret'), UnauthorizedException);
-  assert.doesNotThrow(() => service.verifyWebhookSecret('unit-test-secret'));
-});
-
-test('Telegram webhook processes each update id once', async () => {
+test('Telegram polling processes each update id once', async () => {
   let sentMessages = 0;
   globalThis.fetch = async () => {
     sentMessages += 1;
@@ -156,20 +147,47 @@ test('Telegram webhook processes each update id once', async () => {
     },
   };
 
-  const first = await service.handleWebhook(update);
-  const duplicate = await service.handleWebhook(update);
+  const first = await service.handleUpdate(update);
+  const duplicate = await service.handleUpdate(update);
 
-  assert.deepEqual(first, { ok: true, handled: true });
-  assert.deepEqual(duplicate, { ok: true, handled: false });
+  assert.deepEqual(first, { handled: true });
+  assert.deepEqual(duplicate, { handled: false });
   assert.equal(db.calls.filter(({ sql }) => sql.includes('telegram_connections')).length, 1);
   assert.equal(sentMessages, 1);
 });
 
-test('Telegram guardian endpoints require the GUARDIAN role and webhook is public', async () => {
+test('Telegram long polling removes webhooks and requests message updates', async () => {
+  const calls: { method: string; body: Record<string, unknown> }[] = [];
+  globalThis.fetch = async (input, init) => {
+    const method = String(input).split('/').at(-1)!;
+    calls.push({
+      method,
+      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+    });
+    return new Response(
+      JSON.stringify({ ok: true, result: method === 'getUpdates' ? [] : true }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+
+  const service = new TelegramService(telegramDb() as never);
+  const controller = new AbortController();
+  await service.deleteWebhook(controller.signal);
+  assert.deepEqual(await service.getUpdates(9002, 1, controller.signal), []);
+
+  assert.deepEqual(calls, [
+    { method: 'deleteWebhook', body: { drop_pending_updates: false } },
+    {
+      method: 'getUpdates',
+      body: { offset: 9002, timeout: 1, allowed_updates: ['message'] },
+    },
+  ]);
+});
+
+test('Telegram guardian endpoints require the GUARDIAN role', async () => {
   assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.connect), ['GUARDIAN']);
   assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.status), ['GUARDIAN']);
   assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.disconnect), ['GUARDIAN']);
-  assert.equal(Reflect.getMetadata('public', TelegramController.prototype.webhook), true);
 
   const adminAuth = {
     authenticate: async () => ({ id: 'admin', name: 'Admin', phone: '1', role: 'ADMIN', verified: 1, createdAt: '' }),

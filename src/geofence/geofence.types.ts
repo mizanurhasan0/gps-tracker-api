@@ -14,6 +14,11 @@ export interface GeoCoordinate {
 export interface RouteStopCoordinate extends GeoCoordinate {
   routeId: string;
   stopId: string;
+  /** Persistent pickup-point key used to store this stop's trip state. */
+  pickupPointId: string;
+  /** Stop-specific hysteresis settings, configured by an administrator. */
+  enterRadiusMeters: number;
+  exitRadiusMeters: number;
 }
 
 export interface RouteStopCoordinateLookup {
@@ -60,4 +65,3 @@ export interface GeofenceEvaluationResult {
   shouldNotify: boolean;
   state?: GeofenceState;
 }
-

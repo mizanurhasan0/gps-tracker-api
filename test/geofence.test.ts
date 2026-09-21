@@ -14,8 +14,11 @@ const TRIP_ID = 'trip-1';
 const STOP: RouteStopCoordinate = {
   routeId: ROUTE_ID,
   stopId: STOP_ID,
+  pickupPointId: 'pickup-point-1',
   latitude: 23.8103,
   longitude: 90.4125,
+  enterRadiusMeters: 100,
+  exitRadiusMeters: 150,
 };
 
 class FakeStopLookup implements RouteStopCoordinateLookup {
@@ -68,6 +71,7 @@ describe('haversineDistanceMeters', () => {
   });
 });
 
+
 describe('GeofenceService', () => {
   it('looks up a route stop and enters at the configurable enter radius', async () => {
     const lookup = new FakeStopLookup();
@@ -104,6 +108,28 @@ describe('GeofenceService', () => {
     assert.equal(result.transition, 'none');
     assert.equal(result.shouldNotify, false);
     assert.equal(result.state?.phase, 'inside');
+  });
+
+  it('uses the pickup point radius instead of the application default', async () => {
+    const lookup = new FakeStopLookup({
+      ...STOP,
+      enterRadiusMeters: 50,
+      exitRadiusMeters: 75,
+    });
+    const service = new GeofenceService(lookup, {
+      enterRadiusMeters: 100,
+      exitRadiusMeters: 150,
+    });
+
+    const outside = await service.evaluate(input(positionMetersFromStop(60)));
+    const inside = await service.evaluate(input(positionMetersFromStop(45)));
+    const exited = await service.evaluate(
+      input(positionMetersFromStop(80), inside.state),
+    );
+
+    assert.equal(outside.transition, 'none');
+    assert.equal(inside.transition, 'enter');
+    assert.equal(exited.transition, 'exit');
   });
 
   it('exits only at the exit radius and can re-enter without a second notification', async () => {
@@ -163,4 +189,3 @@ describe('GeofenceService', () => {
     );
   });
 });
-

@@ -54,36 +54,13 @@ function readTelegramConfig() {
   const enabled = readBoolean(process.env.TELEGRAM_ENABLED, false, 'TELEGRAM_ENABLED');
   const botToken = readOptionalString(process.env.TELEGRAM_BOT_TOKEN);
   const botUsername = readOptionalString(process.env.TELEGRAM_BOT_USERNAME)?.replace(/^@/, '');
-  const webhookSecret = readOptionalString(process.env.TELEGRAM_WEBHOOK_SECRET);
-  const webhookUrl = readOptionalString(process.env.TELEGRAM_WEBHOOK_URL);
 
   if (botUsername && !/^[A-Za-z0-9_]{5,32}$/.test(botUsername)) {
     throw new Error('TELEGRAM_BOT_USERNAME must be a valid Telegram bot username');
   }
 
-  if (webhookSecret && !/^[A-Za-z0-9_-]{1,256}$/.test(webhookSecret)) {
-    throw new Error('TELEGRAM_WEBHOOK_SECRET contains unsupported characters');
-  }
-
-  if (webhookUrl) {
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(webhookUrl);
-    } catch {
-      throw new Error('TELEGRAM_WEBHOOK_URL must be a valid URL');
-    }
-    if (parsedUrl.protocol !== 'https:') {
-      throw new Error('TELEGRAM_WEBHOOK_URL must use HTTPS');
-    }
-  }
-
   if (enabled) {
-    const missing = [
-      ['TELEGRAM_BOT_TOKEN', botToken],
-      ['TELEGRAM_BOT_USERNAME', botUsername],
-      ['TELEGRAM_WEBHOOK_SECRET', webhookSecret],
-      ['TELEGRAM_WEBHOOK_URL', webhookUrl],
-    ]
+    const missing = [['TELEGRAM_BOT_TOKEN', botToken]]
       .filter(([, value]) => !value)
       .map(([name]) => name);
 
@@ -96,8 +73,13 @@ function readTelegramConfig() {
     enabled,
     botToken,
     botUsername,
-    webhookSecret,
-    webhookUrl,
+    pollingTimeoutSeconds: readBoundedNumber(
+      process.env.TELEGRAM_POLL_TIMEOUT_SECONDS,
+      50,
+      'TELEGRAM_POLL_TIMEOUT_SECONDS',
+      1,
+      50,
+    ),
     geofenceRadiusMeters: readBoundedNumber(
       process.env.TELEGRAM_GEOFENCE_RADIUS_METERS,
       100,

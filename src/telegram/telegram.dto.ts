@@ -29,8 +29,7 @@ export interface TelegramStatusResponse {
   chatIdLast4: string | null;
 }
 
-export interface TelegramWebhookResponse {
-  ok: true;
+export interface TelegramUpdateResult {
   handled: boolean;
 }
 

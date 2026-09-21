@@ -4,9 +4,8 @@ import {
   Logger,
   OnModuleInit,
   ServiceUnavailableException,
-  UnauthorizedException,
 } from '@nestjs/common';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { appConfig } from '../config/app.config';
 import { DatabaseService } from '../database/database.service';
 import {
@@ -19,7 +18,7 @@ import {
   TelegramConnectResponse,
   TelegramStatusResponse,
   TelegramUpdateDto,
-  TelegramWebhookResponse,
+  TelegramUpdateResult,
 } from './telegram.dto';
 
 interface TelegramSentMessage {
@@ -46,6 +45,12 @@ const MAX_TELEGRAM_ATTEMPTS = 3;
 const MAX_RETRY_AFTER_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 
+interface TelegramRequestOptions {
+  timeoutMs?: number;
+  maxAttempts?: number;
+  signal?: AbortSignal;
+}
+
 class TelegramApiError extends Error {
   constructor(
     message: string,
@@ -59,7 +64,6 @@ class TelegramApiError extends Error {
 export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
   private readonly logger = new Logger(TelegramService.name);
   private readonly botToken = appConfig.telegram.botToken ?? '';
-  private readonly webhookSecret = appConfig.telegram.webhookSecret ?? '';
   private readonly configuredBotUsername = appConfig.telegram.botUsername ?? '';
   private readonly telegramEnabled = appConfig.telegram.enabled;
   private readonly apiBaseUrl =
@@ -137,16 +141,10 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
     );
   }
 
-  verifyWebhookSecret(receivedSecret: string | undefined): void {
-    if (!this.webhookSecret || !this.secretsMatch(receivedSecret))
-      throw new UnauthorizedException('Invalid Telegram webhook secret');
-  }
-
-  async handleWebhook(
-    update: TelegramUpdateDto,
-  ): Promise<TelegramWebhookResponse> {
+  /** Processes one inbound update from the long-polling worker exactly once. */
+  async handleUpdate(update: TelegramUpdateDto): Promise<TelegramUpdateResult> {
     const updateId = this.asInteger(update.update_id);
-    if (updateId === undefined) return { ok: true, handled: false };
+    if (updateId === undefined) return { handled: false };
 
     const inserted = await this.db.run(
       `INSERT INTO telegram_webhook_updates ("updateId",payload,status,"receivedAt")
@@ -154,21 +152,21 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       updateId,
       JSON.stringify(update),
     );
-    if (!inserted.changes) return { ok: true, handled: false };
+    if (!inserted.changes) return { handled: false };
 
     const message = update.message;
     const chatId = this.asChatId(message?.chat?.id);
     const text = this.asString(message?.text);
     if (!chatId || message?.chat?.type !== 'private' || !text) {
-      await this.markWebhookUpdate(updateId);
-      return { ok: true, handled: false };
+      await this.markUpdate(updateId);
+      return { handled: false };
     }
 
     const startPayload = this.extractStartPayload(text);
     if (!startPayload) {
       await this.trySendMessage(chatId, 'সংযোগ করতে Connect Telegram লিংক থেকে Telegram Bot-এ Start চাপুন।');
-      await this.markWebhookUpdate(updateId);
-      return { ok: true, handled: true };
+      await this.markUpdate(updateId);
+      return { handled: true };
     }
 
     const tokenHash = this.digest(startPayload);
@@ -184,8 +182,8 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
         chatId,
         'এই Telegram connection link-এর মেয়াদ শেষ হয়েছে। App থেকে নতুন link তৈরি করুন।',
       );
-      await this.markWebhookUpdate(updateId);
-      return { ok: true, handled: true };
+      await this.markUpdate(updateId);
+      return { handled: true };
     }
 
     try {
@@ -220,14 +218,14 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
           chatId,
           'এই Telegram account অন্য একটি guardian account-এর সঙ্গে যুক্ত আছে।',
         );
-        await this.markWebhookUpdate(updateId);
-        return { ok: true, handled: true };
+        await this.markUpdate(updateId);
+        return { handled: true };
       }
       if (error instanceof ConflictException) {
-        await this.markWebhookUpdate(updateId, 'FAILED', error.message);
-        return { ok: true, handled: false };
+        await this.markUpdate(updateId, 'FAILED', error.message);
+        return { handled: false };
       }
-      await this.markWebhookUpdate(updateId, 'FAILED', this.errorMessage(error));
+      await this.markUpdate(updateId, 'FAILED', this.errorMessage(error));
       throw error;
     }
 
@@ -235,8 +233,38 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       chatId,
       'Telegram সফলভাবে সংযুক্ত হয়েছে। এখন থেকে এই account-এ notification পাঠানো যাবে।',
     );
-    await this.markWebhookUpdate(updateId);
-    return { ok: true, handled: true };
+    await this.markUpdate(updateId);
+    return { handled: true };
+  }
+
+  async deleteWebhook(signal: AbortSignal): Promise<void> {
+    await this.requestTelegram<boolean>('deleteWebhook', {
+      drop_pending_updates: false,
+    }, { signal });
+  }
+
+  async getUpdates(
+    offset: number | undefined,
+    timeoutSeconds: number,
+    signal: AbortSignal,
+  ): Promise<TelegramUpdateDto[]> {
+    return this.requestTelegram<TelegramUpdateDto[]>(
+      'getUpdates',
+      {
+        ...(offset === undefined ? {} : { offset }),
+        timeout: timeoutSeconds,
+        allowed_updates: ['message'],
+      },
+      {
+        timeoutMs: (timeoutSeconds + 10) * 1_000,
+        maxAttempts: 1,
+        signal,
+      },
+    );
+  }
+
+  getUpdateId(update: TelegramUpdateDto): number | undefined {
+    return this.asInteger(update.update_id);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -299,24 +327,39 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
   private async requestTelegram<T>(
     method: string,
     body: Record<string, unknown>,
+    options: TelegramRequestOptions = {},
   ): Promise<T> {
     this.requireConfigured();
-    for (let attempt = 0; attempt < MAX_TELEGRAM_ATTEMPTS; attempt += 1) {
+    const maxAttempts = options.maxAttempts ?? MAX_TELEGRAM_ATTEMPTS;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       let response: Response;
       let payload: TelegramApiEnvelope<T>;
       try {
-        response = await fetch(
-          `${this.apiBaseUrl}/bot${this.botToken}/${method}`,
-          {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-          },
+        const requestController = new AbortController();
+        const timeout = setTimeout(
+          () => requestController.abort(),
+          options.timeoutMs ?? REQUEST_TIMEOUT_MS,
         );
-        payload = (await response.json()) as TelegramApiEnvelope<T>;
+        const abortRequest = () => requestController.abort();
+        options.signal?.addEventListener('abort', abortRequest, { once: true });
+        if (options.signal?.aborted) requestController.abort();
+        try {
+          response = await fetch(
+            `${this.apiBaseUrl}/bot${this.botToken}/${method}`,
+            {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: requestController.signal,
+            },
+          );
+          payload = (await response.json()) as TelegramApiEnvelope<T>;
+        } finally {
+          clearTimeout(timeout);
+          options.signal?.removeEventListener('abort', abortRequest);
+        }
       } catch (error) {
-        if (attempt + 1 >= MAX_TELEGRAM_ATTEMPTS) throw error;
+        if (options.signal?.aborted || attempt + 1 >= maxAttempts) throw error;
         await this.delay(2 ** attempt * 500);
         continue;
       }
@@ -324,7 +367,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       if (payload.ok === true && payload.result !== undefined) return payload.result;
 
       const retryAfter = this.asInteger(payload.parameters?.retry_after);
-      if (retryAfter !== undefined && attempt + 1 < MAX_TELEGRAM_ATTEMPTS) {
+      if (retryAfter !== undefined && attempt + 1 < maxAttempts) {
         await this.delay(Math.min(retryAfter * 1000, MAX_RETRY_AFTER_MS));
         continue;
       }
@@ -341,21 +384,12 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
   private requireConfigured(): void {
     if (!this.isConfigured())
       throw new ServiceUnavailableException(
-        'Telegram integration is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET.',
+        'Telegram integration is not configured. Set TELEGRAM_BOT_TOKEN.',
       );
   }
 
   private isConfigured(): boolean {
-    return Boolean(this.telegramEnabled && this.botToken && this.webhookSecret);
-  }
-
-  private secretsMatch(receivedSecret: string | undefined): boolean {
-    if (!receivedSecret) return false;
-    const expected = Buffer.from(this.webhookSecret);
-    const received = Buffer.from(receivedSecret);
-    return (
-      expected.length === received.length && timingSafeEqual(expected, received)
-    );
+    return Boolean(this.telegramEnabled && this.botToken);
   }
 
   private extractStartPayload(text: string): string | undefined {
@@ -368,7 +402,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
     return createHash('sha256').update(value).digest('hex');
   }
 
-  private markWebhookUpdate(
+  private markUpdate(
     updateId: number,
     status: 'PROCESSED' | 'FAILED' = 'PROCESSED',
     errorMessage: string | null = null,

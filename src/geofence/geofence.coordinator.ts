@@ -126,6 +126,10 @@ export class GeofenceCoordinator
     assignments: Assignment[],
   ): Promise<void> {
     const first = assignments[0];
+    // The state table is keyed by pickup_points.id, rather than stops.id. Read
+    // it before locking state so every read/write uses the real foreign key.
+    const pickupPoint = await this.findStopCoordinate(first.routeId, first.stopId);
+    if (!pickupPoint) return;
     const serviceDate = this.dhakaDate(position.receivedAt);
     const trip = await this.db.get<TripRow>(
       `INSERT INTO geofence_trips
@@ -150,7 +154,7 @@ export class GeofenceCoordinator
          FROM geofence_trip_states
          WHERE "tripId"=$1 AND "pickupPointId"=$2 FOR UPDATE`,
         trip.id,
-        first.stopId,
+        pickupPoint.pickupPointId,
       );
       const result = await this.evaluator.evaluate({
         tripId: trip.id,
@@ -194,7 +198,7 @@ export class GeofenceCoordinator
            "lastEnteredAt"=EXCLUDED."lastEnteredAt",
            "lastEventKey"=EXCLUDED."lastEventKey", "updatedAt"=now()`,
         trip.id,
-        first.stopId,
+        pickupPoint.pickupPointId,
         result.state.phase === 'inside' ? 'INSIDE' : 'OUTSIDE',
         entryCount,
         position.latitude,
@@ -233,7 +237,8 @@ export class GeofenceCoordinator
     stopId: string,
   ): Promise<RouteStopCoordinate | null> {
     const row = await this.db.get<RouteStopCoordinate>(
-      `SELECT s."routeId", p."stopId", p.latitude, p.longitude
+      `SELECT s."routeId", p."stopId", p.id AS "pickupPointId", p.latitude, p.longitude,
+          p."enterRadiusMeters", p."exitRadiusMeters"
        FROM pickup_points p
        JOIN stops s ON s.id = p."stopId"
        WHERE s."routeId" = $1 AND p."stopId" = $2 AND p.active = TRUE`,
