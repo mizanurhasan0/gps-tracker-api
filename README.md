@@ -10,7 +10,7 @@ raw TCP connections from devices, keeps each device's latest position, exposes a
 authenticated REST API, and pushes authorized live updates over Socket.IO.
 
 The transport modules add guardian/admin accounts, routes/stops, approval-based
-service subscriptions, manual bKash/Rocket payments, complaints, stop requests,
+service subscriptions, configurable payment methods, QR images and payment evidence, complaints, stop requests,
 persistent in-app notifications and audit history. No payment gateway is used.
 The Noor management module adds connected student/driver profiles, attendance,
 maintenance, an income/expense/investment ledger, targeted notices, requests,
@@ -38,7 +38,7 @@ self-register using a Bangladesh phone number and a password (8–128 characters
 Changing ADMIN_PASSWORD later does not reset an existing account's password.
 No default admin credentials are shipped. Password reset/OTP is not implemented.
 
-The mobile app's admin **Setup** screen configures receiving wallet numbers,
+The mobile app's admin **Setup** screen configures payment methods, receiving accounts and QR images,
 vehicles and routes. Admin **Bills** generates the chosen month's bills. A
 subsequent guardian submission is **PENDING**; the bill stays **UNPAID** until
 an admin verifies the external transfer and approves it.
@@ -67,11 +67,12 @@ All endpoints below except registration/login require
 | PATCH | `/admin/requests/:id/decision` | `{decision:"APPROVED"|"REJECTED",note?}` |
 | POST | `/admin/requests/:id/call-notes` | `{note}`; records a manual call note |
 | GET | `/subscriptions` | Own subscriptions, or all for admin |
-| GET | `/payments/accounts` | Configured admin wallet numbers |
-| PUT | `/admin/payment-accounts/:method` | BKASH/ROCKET: `{number,instructions}` |
+| GET | `/payments/accounts` | Configured methods with `method`, `name`, `number`, `instructions`, `imageUrl` |
+| PUT | `/admin/payment-accounts/:method` | Admin: `{name?,number,instructions,imageUrl?}`; stable method key (letters, digits, `_`, `-`, max 80) |
 | POST | `/admin/bills/generate` | `{month:"YYYY-MM"}`; idempotent; no future month |
 | GET | `/payments/monthly?month=YYYY-MM` | Own bills, or all for admin; optional month |
 | POST | `/payments/submissions` | Guardian proof details; example below |
+| PATCH | `/payments/submissions/:id/evidence` | Owning guardian, PENDING only: `{transactionId?,evidenceImageUrl?,transactionInfo?}` |
 | GET | `/payments/submissions` | Own history / admin payment review queue |
 | PATCH | `/admin/payments/:id/decision` | Admin approve/reject; rejection needs note |
 | GET / POST | `/complaints` | Own history / new `{subscriptionId,category,description}` |
@@ -97,8 +98,7 @@ Example manual payment body (**amounts are integer poisha**, not taka):
 
 The receiving number must be a current or previously configured admin account.
 This preserves the actual destination if settings change after a guardian sends
-money. The exact bill amount is required. Transaction IDs are normalized and
-unique within each payment method across pending/approved submissions. Rejected
+money. The exact bill amount is required. Non-empty transaction IDs are trimmed and compared case-insensitively for uniqueness within each payment method across pending/approved submissions. Rejected
 proof stays in history and may be corrected and resubmitted. Only one pending
 submission is allowed per bill. A paid bill cannot be paid again through this API.
 
@@ -313,3 +313,23 @@ backups until migration is verified. No automatic history retention is enabled.
 isolated schemas and exercise HTTP ownership/roles, payments and transaction
 rollback, GPS persistence, history and protocol behavior. Never use production
 credentials for tests. Tests also need permission to bind a localhost HTTP port.
+
+## Dynamic payment methods (migration 9)
+
+Any payment provider can be configured. `method` is a stable identifier; `name` is the
+editable display name (up to 80 characters). Account/sender numbers accept up to 100
+characters, including bank references. Old bKash/Rocket identifiers, account-number
+history, and submissions are preserved. Submission `methodName` snapshots the provider
+name so renaming a method does not rewrite receipts.
+
+`imageUrl` is an optional uploaded QR image. Guardian submissions accept optional
+`evidenceImageUrl` and `transactionInfo` (up to 1000 characters). Either a transaction ID
+or an evidence image is required; a free-text note alone is insufficient. IDs support
+1–100 letters/digits and `.`, `_`, `:`, `/`, `-`. Blank IDs for image-only proof do not
+reserve a transaction reference. Both image fields accept embedded JPEG/PNG data URLs
+up to 450,000 characters (empty string removes the image). Images remain in PostgreSQL,
+using existing authenticated JSON endpoints and the existing 768 KB request limit.
+Only admins and the submission owner can read evidence; only its owner can edit pending
+proof. Approved/rejected records cannot be edited; rejected bills can be resubmitted.
+Payments still require external transfer and admin verification; QR display does not
+initiate or confirm a transfer automatically.

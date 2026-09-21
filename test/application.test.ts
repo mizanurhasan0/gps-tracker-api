@@ -448,6 +448,39 @@ test(
         transactionId: 'ABC1234567',
         amount: bill.amount,
       };
+      await t.test('supports custom QR accounts and private editable evidence', async () => {
+        const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT1sAAAAASUVORK5CYII=';
+        const account = { name: 'School Bank', number: 'AC-1234567890123456', instructions: '', imageUrl: image };
+        await request('/admin/payment-accounts/BANK', guardian.token, account, 'PUT', 403);
+        await request('/admin/payment-accounts/BANK', admin.token, { ...account, imageUrl: 'data:image/svg+xml;base64,AAAA' }, 'PUT', 400);
+        await request('/admin/payment-accounts/BANK', admin.token, account, 'PUT', 204);
+        const accounts = await request<any[]>('/payments/accounts', guardian.token);
+        assert.deepEqual(accounts.find(item => item.method === 'BANK'), { method: 'BANK', ...account });
+        const input = { ...paymentInput, method: 'BANK', recipientNumber: account.number, senderNumber: 'AC-SENDER', transactionId: '' };
+        await request('/payments/submissions', guardian.token, input, 'POST', 400);
+        await request('/payments/submissions', guardian.token, { ...input, evidenceImageUrl: 'invalid' }, 'POST', 400);
+        const submission = await request<any>('/payments/submissions', guardian.token,
+          { ...input, evidenceImageUrl: image, transactionInfo: 'Paid at school branch' }, 'POST', 201);
+        assert.equal(submission.methodName, 'School Bank');
+        assert.equal(submission.evidenceImageUrl, image);
+        assert.equal(submission.status, 'PENDING');
+        const endpoint = `/payments/submissions/${submission.id}/evidence`;
+        await request(endpoint, other.token, { transactionInfo: 'Not mine' }, 'PATCH', 404);
+        await request(endpoint, admin.token, { transactionInfo: 'No guardian permission' }, 'PATCH', 403);
+        assert.deepEqual(await request('/payments/submissions', other.token), []);
+        await request(endpoint, guardian.token, { evidenceImageUrl: '' }, 'PATCH', 400);
+        const updated = await request<any>(endpoint, guardian.token,
+          { transactionId: 'BANK/2026-09.123', transactionInfo: 'Branch reference added' }, 'PATCH');
+        assert.equal(updated.evidenceImageUrl, image);
+        assert.equal(updated.transactionInfo, 'Branch reference added');
+        const adminHistory = await request<any[]>('/payments/submissions', admin.token);
+        assert.equal(adminHistory.find(item => item.id === submission.id).evidenceImageUrl, image);
+        await request('/admin/payment-accounts/BANK', admin.token, { ...account, name: 'Renamed Bank' }, 'PUT', 204);
+        assert.equal((await request<any[]>('/payments/submissions', guardian.token))[0].methodName, 'School Bank');
+        await request(`/admin/payments/${submission.id}/decision`, admin.token,
+          { decision: 'REJECTED', note: 'Please correct the transfer' }, 'PATCH');
+        await request(endpoint, guardian.token, { transactionInfo: 'Too late' }, 'PATCH', 409);
+      });
       let payment: PaymentSubmission;
       await t.test(
         'validates manual submission and snapshots the receiver',

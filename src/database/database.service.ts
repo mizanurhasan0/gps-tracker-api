@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Pool, PoolClient, QueryResultRow } from 'pg';
+import { paymentsSchema } from './payments.schema';
 import { schema } from './schema';
 import { managementSchema } from './management.schema';
 import { faresSchema } from './fares.schema';
@@ -119,6 +120,11 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
       if (!telegramApplied.rowCount) {
         await client.query(telegramSchema);
         await client.query('INSERT INTO app_migrations(version) VALUES(8)');
+      }
+      const paymentsApplied = await client.query('SELECT version FROM app_migrations WHERE version = 9');
+      if (!paymentsApplied.rowCount) {
+        await client.query(paymentsSchema);
+        await client.query('INSERT INTO app_migrations(version) VALUES(9)');
       }
       await client.query('COMMIT');
     } catch (error) {

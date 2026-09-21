@@ -12,16 +12,20 @@ import {
   MinLength,
 } from 'class-validator';
 import { trim } from '../auth/auth.dto';
-export class PaymentSubmissionDto {
+export class PaymentEvidenceDto {
+  @IsOptional() @Transform(trim) @Matches(/^(?:|[A-Za-z0-9][A-Za-z0-9._:/-]{0,99})$/)
+  transactionId?: string;
+  @IsOptional() @IsString() @MaxLength(450000)
+  @Matches(/^(?:|data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2})$/)
+  evidenceImageUrl?: string;
+  @IsOptional() @Transform(trim) @IsString() @MaxLength(1000)
+  transactionInfo?: string;
+}
+export class PaymentSubmissionDto extends PaymentEvidenceDto {
   @IsUUID() billId!: string;
-  @IsIn(['BKASH', 'ROCKET']) method!: 'BKASH' | 'ROCKET';
-  @Transform(trim) @Matches(/^01[3-9]\d{8,9}$/) senderNumber!: string;
-  @Transform(({ value }) =>
-    typeof value === 'string' ? value.trim().toUpperCase() : value,
-  )
-  @Matches(/^[A-Z0-9]{6,40}$/)
-  transactionId!: string;
-  @Transform(trim) @Matches(/^01[3-9]\d{8,9}$/) recipientNumber!: string;
+  @Matches(/^[A-Za-z0-9_-]{1,80}$/) method!: string;
+  @Transform(trim) @IsString() @MinLength(1) @MaxLength(100) senderNumber!: string;
+  @Transform(trim) @IsString() @MinLength(1) @MaxLength(100) recipientNumber!: string;
   // All monetary amounts are integer poisha, never binary floating-point taka.
   @IsInt() @Min(1) @Max(100_000_000) amount!: number;
 }
@@ -30,10 +34,13 @@ export class DecisionDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(500) note?: string;
 }
 export class PaymentAccountDto {
-  @Transform(trim) @Matches(/^01[3-9]\d{8,9}$/) number!: string;
+  @IsOptional() @Transform(trim) @IsString() @MinLength(1) @MaxLength(80) name?: string;
+  @Transform(trim) @IsString() @MinLength(1) @MaxLength(100) number!: string;
+  @IsOptional() @IsString() @MaxLength(450000)
+  @Matches(/^(?:|data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2})$/)
+  imageUrl?: string;
   @Transform(trim)
   @IsString()
-  @MinLength(1)
   @MaxLength(300)
   instructions!: string;
 }

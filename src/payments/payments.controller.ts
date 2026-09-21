@@ -17,6 +17,7 @@ import {
   GenerateBillsDto,
   MonthlyQueryDto,
   PaymentAccountDto,
+  PaymentEvidenceDto,
   PaymentSubmissionDto,
 } from './payments.dto';
 import { PaymentsService } from './payments.service';
@@ -47,6 +48,11 @@ export class PaymentsController {
   @Post('payments/submissions')
   submit(@Req() req: AuthRequest, @Body() input: PaymentSubmissionDto) {
     return this.payments.submit(req.user, input);
+  }
+  @Roles('GUARDIAN')
+  @Patch('payments/submissions/:id/evidence')
+  evidence(@Req() req: AuthRequest, @Param('id') id: string, @Body() input: PaymentEvidenceDto) {
+    return this.payments.updateEvidence(req.user, id, input);
   }
   @Roles('ADMIN')
   @Post('admin/bills/generate')

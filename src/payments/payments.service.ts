@@ -11,6 +11,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import {
   DecisionDto,
   PaymentAccountDto,
+  PaymentEvidenceDto,
   PaymentSubmissionDto,
 } from './payments.dto';
 export interface Bill {
@@ -26,6 +27,8 @@ export interface Bill {
 export interface PaymentSubmission extends PaymentSubmissionDto {
   id: string;
   guardianId: string;
+  methodName: string;
+  transactionId: string;
   recipientNumber: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   note: string;
@@ -33,7 +36,9 @@ export interface PaymentSubmission extends PaymentSubmissionDto {
   reviewedAt: string | null;
 }
 export interface PaymentAccount {
-  method: 'BKASH' | 'ROCKET';
+  method: string;
+  name: string;
+  imageUrl: string;
   number: string;
   instructions: string;
 }
@@ -49,7 +54,7 @@ export class PaymentsService {
   ) {}
 
   async accounts(): Promise<PaymentAccount[]> {
-    return await this.db.all('SELECT * FROM payment_accounts ORDER BY method');
+    return await this.db.all('SELECT * FROM payment_accounts ORDER BY name, method');
   }
 
   async setAccount(
@@ -57,17 +62,20 @@ export class PaymentsService {
     method: string,
     input: PaymentAccountDto
   ): Promise<void> {
-    if (!['BKASH', 'ROCKET'].includes(method))
-      throw new BadRequestException('Unsupported payment method');
-    if (method === 'BKASH' && input.number.length !== 11)
-      throw new BadRequestException('bKash number must have 11 digits');
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(method))
+      throw new BadRequestException('Invalid payment method');
     await this.db.transaction(async () => {
       await this.db.run(
-        `INSERT INTO payment_accounts VALUES ($1,$2,$3) ON CONFLICT(method)
-        DO UPDATE SET number = excluded.number, instructions = excluded.instructions`,
+        `INSERT INTO payment_accounts (method,number,instructions,name,"imageUrl") VALUES ($1,$2,$3,$4,$5) ON CONFLICT(method)
+        DO UPDATE SET number = excluded.number, instructions = excluded.instructions,
+          name = COALESCE($7, payment_accounts.name), "imageUrl" = COALESCE($6, payment_accounts."imageUrl")`,
         method,
         input.number,
-        input.instructions
+        input.instructions,
+        input.name ?? (method === 'BKASH' ? 'bKash' : method === 'ROCKET' ? 'Rocket' : method),
+        input.imageUrl ?? '',
+        input.imageUrl ?? null,
+        input.name ?? null
       );
       await this.db.run(
         `INSERT INTO payment_account_history (method,number) VALUES ($1,$2) ON CONFLICT(method,number) DO NOTHING`,
@@ -176,6 +184,7 @@ export class PaymentsService {
     user: User,
     input: PaymentSubmissionDto
   ): Promise<PaymentSubmission> {
+    this.requireProof(input);
     return this.db
       .transaction(async () => {
         const bill = await this.db.get<Bill>(
@@ -209,10 +218,6 @@ export class PaymentsService {
             'This receiving number is not an admin payment account. Contact the admin before sending money'
           );
         }
-        if (input.method === 'BKASH' && input.senderNumber.length !== 11)
-          throw new BadRequestException(
-            'bKash sender number must have 11 digits'
-          );
         if (
           await this.db.get(
             `SELECT id FROM payment_submissions WHERE "billId" = $1 AND status = 'PENDING'`,
@@ -224,7 +229,7 @@ export class PaymentsService {
           );
         }
         if (
-          await this.db.get(
+          input.transactionId && await this.db.get(
             `SELECT id FROM payment_submissions WHERE method = $1 AND lower("transactionId") = lower($2) AND status != 'REJECTED'`,
             input.method,
             input.transactionId
@@ -237,21 +242,24 @@ export class PaymentsService {
         const id = randomUUID();
         await this.db.run(
           `INSERT INTO payment_submissions
-        (id,"billId","guardianId",method,"recipientNumber","senderNumber","transactionId",amount,status,"createdAt")
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9)`,
+        (id,"billId","guardianId",method,"recipientNumber","senderNumber","transactionId",amount,status,"createdAt","methodName","evidenceImageUrl","transactionInfo")
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$12)`,
           id,
           bill.id,
           user.id,
           input.method,
           input.recipientNumber,
           input.senderNumber,
-          input.transactionId,
+          input.transactionId ?? '',
           input.amount,
-          new Date().toISOString()
+          new Date().toISOString(),
+          account.name,
+          input.evidenceImageUrl ?? '',
+          input.transactionInfo ?? ''
         );
         await this.notifications.admins(
           'Payment needs verification',
-          `${user.name} submitted a ${input.method} payment for ${bill.month}.`,
+          `${user.name} submitted a ${account.name} payment for ${bill.month}.`,
           id
         );
         await this.notifications.audit(user.id, 'PAYMENT_SUBMITTED', id);
@@ -282,6 +290,35 @@ export class PaymentsService {
       });
   }
 
+  private requireProof(input: PaymentEvidenceDto) {
+    if (!input.transactionId?.trim() && !input.evidenceImageUrl)
+      throw new BadRequestException('Enter a transaction ID or upload payment evidence.');
+  }
+
+  async updateEvidence(user: User, id: string, input: PaymentEvidenceDto) {
+    return this.db.transaction(async () => {
+      const payment = await this.db.get<PaymentSubmission>(
+        `SELECT * FROM payment_submissions WHERE id=$1 AND "guardianId"=$2 FOR UPDATE`, id, user.id
+      );
+      if (!payment) throw new NotFoundException('Payment submission not found');
+      if (payment.status !== 'PENDING') throw new ConflictException('This payment has already been reviewed');
+      const next = { ...payment, ...input };
+      this.requireProof(next);
+      try {
+        await this.db.run(
+          `UPDATE payment_submissions SET "transactionId"=$1,"evidenceImageUrl"=$2,"transactionInfo"=$3 WHERE id=$4`,
+          next.transactionId ?? '', next.evidenceImageUrl ?? '', next.transactionInfo ?? '', id
+        );
+      } catch (error) {
+        if ((error as { code?: string }).code === '23505')
+          throw new ConflictException('This transaction ID has already been submitted');
+        throw error;
+      }
+      await this.notifications.audit(user.id, 'PAYMENT_EVIDENCE_UPDATED', id);
+      return this.db.get<PaymentSubmission>('SELECT * FROM payment_submissions WHERE id=$1', id);
+    });
+  }
+
   async review(
     actor: User,
     id: string,
@@ -293,7 +330,7 @@ export class PaymentsService {
       );
     return this.db.transaction(async () => {
       const submission = await this.db.get<PaymentSubmission>(
-        `SELECT * FROM payment_submissions WHERE id = $1`,
+        `SELECT * FROM payment_submissions WHERE id = $1 FOR UPDATE`,
         id
       );
       if (!submission)
