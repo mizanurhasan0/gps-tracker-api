@@ -21,23 +21,17 @@ import type { Vehicle } from './vehicle.types';
 export class VehiclesController {
   constructor(
     private readonly vehicles: VehiclesService,
-    private readonly access: AccessService
+    private readonly access: AccessService,
   ) {}
 
   @Get()
   async findAll(@Req() req: AuthRequest): Promise<{ vehicles: Vehicle[] }> {
     const vehicles = await this.vehicles.findAll();
-    const allowed = await Promise.all(
-      vehicles.map((vehicle) => this.access.canTrack(req.user, vehicle.imei))
-    );
-    return { vehicles: vehicles.filter((_, index) => allowed[index]) };
+    return { vehicles: await this.access.filterTrackable(req.user, vehicles) };
   }
 
   @Get(':id')
-  async findOne(
-    @Param('id') id: string,
-    @Req() req: AuthRequest
-  ): Promise<Vehicle> {
+  async findOne(@Param('id') id: string, @Req() req: AuthRequest): Promise<Vehicle> {
     const vehicle = await this.vehicles.findOne(id);
     await this.access.assertTracking(req.user, vehicle.imei);
     return vehicle;
@@ -51,10 +45,7 @@ export class VehiclesController {
 
   @Roles('ADMIN')
   @Patch(':id')
-  update(
-    @Param('id') id: string,
-    @Body() body: UpdateVehicleDto
-  ): Promise<Vehicle> {
+  update(@Param('id') id: string, @Body() body: UpdateVehicleDto): Promise<Vehicle> {
     return this.vehicles.update(id, body);
   }
 

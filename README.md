@@ -139,6 +139,7 @@ are performed by the server.
 
 ```
 src/
+├── common/                  Shared collection and Bangladesh business-time helpers
 ├── config/app.config.ts     Typed, env-driven configuration
 ├── database/                PostgreSQL pool, schema migrations and transactions
 ├── gt06/                    Device protocol
@@ -256,8 +257,11 @@ Returns HTTP 503 if PostgreSQL cannot be queried.
 
 Socket.IO on `SOCKET_PORT` authenticates `auth: { token }` during the handshake.
 It emits `location:update` with the same `DeviceLocation` payload only to authorized
-clients. Session validity and active vehicle assignment are checked before every
-delivery, so logout, expiration and stop approval also affect existing sockets.
+clients. Session validity and active vehicle assignment are checked before each
+broadcast batch of up to 250 clients. These checks use at most two queries per
+batch and do not cache access across broadcasts, so logout, expiration and stop
+approval also affect existing sockets. A database failure suppresses that update;
+the next broadcast retries authorization.
 
 ## Device setup
 
@@ -313,6 +317,12 @@ backups until migration is verified. No automatic history retention is enabled.
 isolated schemas and exercise HTTP ownership/roles, payments and transaction
 rollback, GPS persistence, history and protocol behavior. Never use production
 credentials for tests. Tests also need permission to bind a localhost HTTP port.
+
+The unit command includes geofencing, location hooks, profile validation,
+Telegram delivery/security/polling, business dates and batched realtime access,
+in addition to the protocol and history math tests. The full command also runs
+the deployment-script tests. See [refactor review](docs/REFACTOR_REVIEW.md) for
+the cleanup decisions and performance changes.
 
 ## Dynamic payment methods (migration 9)
 

@@ -84,9 +84,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
     this.requireConfigured();
     const botUsername = await this.getBotUsername();
     const token = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(
-      Date.now() + this.linkTtlSeconds * 1000,
-    ).toISOString();
+    const expiresAt = new Date(Date.now() + this.linkTtlSeconds * 1000).toISOString();
 
     await this.db.transaction(async () => {
       await this.db.run(
@@ -135,10 +133,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       new Date().toISOString(),
       guardianId,
     );
-    await this.db.run(
-      'DELETE FROM telegram_link_tokens WHERE "guardianId" = $1',
-      guardianId,
-    );
+    await this.db.run('DELETE FROM telegram_link_tokens WHERE "guardianId" = $1', guardianId);
   }
 
   /** Processes one inbound update from the long-polling worker exactly once. */
@@ -152,7 +147,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       updateId,
       JSON.stringify(update),
     );
-    if (!inserted.changes) return { handled: false };
+    if (!inserted.rowCount) return { handled: false };
 
     const message = update.message;
     const chatId = this.asChatId(message?.chat?.id);
@@ -164,7 +159,10 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
 
     const startPayload = this.extractStartPayload(text);
     if (!startPayload) {
-      await this.trySendMessage(chatId, 'সংযোগ করতে Connect Telegram লিংক থেকে Telegram Bot-এ Start চাপুন।');
+      await this.trySendMessage(
+        chatId,
+        'সংযোগ করতে Connect Telegram লিংক থেকে Telegram Bot-এ Start চাপুন।',
+      );
       await this.markUpdate(updateId);
       return { handled: true };
     }
@@ -195,7 +193,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
           tokenHash,
           new Date().toISOString(),
         );
-        if (!consumed.changes) throw new ConflictException('Link already used');
+        if (!consumed.rowCount) throw new ConflictException('Link already used');
         await this.db.run(
           `INSERT INTO telegram_connections
              ("guardianId","chatId",username,status,"connectedAt","disconnectedAt","updatedAt")
@@ -238,9 +236,13 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
   }
 
   async deleteWebhook(signal: AbortSignal): Promise<void> {
-    await this.requestTelegram<boolean>('deleteWebhook', {
-      drop_pending_updates: false,
-    }, { signal });
+    await this.requestTelegram<boolean>(
+      'deleteWebhook',
+      {
+        drop_pending_updates: false,
+      },
+      { signal },
+    );
   }
 
   async getUpdates(
@@ -275,11 +277,20 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
     });
   }
 
-  async deliver(
-    message: TelegramDeliveryMessage,
-  ): Promise<TelegramDeliveryResult> {
+  async deliver(message: TelegramDeliveryMessage): Promise<TelegramDeliveryResult> {
     if (!this.isConfigured())
       return { status: 'SKIPPED', reason: 'Telegram integration is disabled' };
+
+    // Recheck the queued recipient: disconnecting or relinking must prevent
+    // private notifications from reaching an obsolete chat.
+    const connection = await this.db.get<{ chatId: string }>(
+      `SELECT "chatId" FROM telegram_connections
+       WHERE "guardianId"=$1 AND "chatId"=$2 AND status='CONNECTED'`,
+      message.userId,
+      message.chatId,
+    );
+    if (!connection)
+      return { status: 'SKIPPED', reason: 'Telegram is no longer connected for this guardian' };
 
     try {
       const sent = await this.requestTelegram<TelegramSentMessage>('sendMessage', {
@@ -287,9 +298,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
         text: `${message.title}\n\n${message.body}`,
       });
       const providerMessageId = this.asStringOrNumber(sent.message_id);
-      return providerMessageId
-        ? { status: 'SENT', providerMessageId }
-        : { status: 'SENT' };
+      return providerMessageId ? { status: 'SENT', providerMessageId } : { status: 'SENT' };
     } catch (error) {
       if (error instanceof TelegramApiError && [400, 403].includes(error.statusCode))
         return { status: 'SKIPPED', reason: error.message };
@@ -301,9 +310,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
     try {
       await this.sendMessage(chatId, text);
     } catch (error) {
-      this.logger.warn(
-        `Telegram acknowledgement failed: ${this.errorMessage(error)}`,
-      );
+      this.logger.warn(`Telegram acknowledgement failed: ${this.errorMessage(error)}`);
     }
   }
 
@@ -313,7 +320,8 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       this.botUsernamePromise = this.requestTelegram<TelegramBotInfo>('getMe', {})
         .then((bot) => {
           const username = this.asString(bot.username);
-          if (!username) throw new ServiceUnavailableException('Telegram bot username is unavailable');
+          if (!username)
+            throw new ServiceUnavailableException('Telegram bot username is unavailable');
           return username;
         })
         .catch((error) => {
@@ -344,15 +352,12 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
         options.signal?.addEventListener('abort', abortRequest, { once: true });
         if (options.signal?.aborted) requestController.abort();
         try {
-          response = await fetch(
-            `${this.apiBaseUrl}/bot${this.botToken}/${method}`,
-            {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(body),
-              signal: requestController.signal,
-            },
-          );
+          response = await fetch(`${this.apiBaseUrl}/bot${this.botToken}/${method}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: requestController.signal,
+          });
           payload = (await response.json()) as TelegramApiEnvelope<T>;
         } finally {
           clearTimeout(timeout);
@@ -373,10 +378,7 @@ export class TelegramService implements OnModuleInit, TelegramDeliveryPort {
       }
 
       const description = this.asString(payload.description) ?? `HTTP ${response.status}`;
-      throw new TelegramApiError(
-        `Telegram API error: ${description}`,
-        response.status,
-      );
+      throw new TelegramApiError(`Telegram API error: ${description}`, response.status);
     }
     throw new ServiceUnavailableException('Telegram API request failed');
   }

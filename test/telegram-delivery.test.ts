@@ -6,7 +6,6 @@ import { NotificationsService } from '../src/notifications/notifications.service
 
 interface MutationResult {
   rowCount: number;
-  changes: number;
 }
 
 class DeliveryDatabaseStub {
@@ -35,7 +34,7 @@ class DeliveryDatabaseStub {
 
   async run(sql: string, ..._params: unknown[]): Promise<MutationResult> {
     this.updates.push(sql);
-    return { rowCount: 1, changes: 1 };
+    return { rowCount: 1 };
   }
 }
 
@@ -49,7 +48,9 @@ test('notification delivery worker does not deliver the same claimed job twice',
     },
   };
   const service = new NotificationsService(db as never, telegram);
-  const process = (service as unknown as { processDeliveries: () => Promise<void> }).processDeliveries.bind(service);
+  const process = (
+    service as unknown as { processDeliveries: () => Promise<void> }
+  ).processDeliveries.bind(service);
 
   await Promise.all([process(), process()]);
 

@@ -3,10 +3,7 @@ import { test } from 'node:test';
 import { LocationsService } from '../src/locations/locations.service';
 import type { DeviceRecord, SavedPosition } from '../src/locations/location.types';
 
-function fixture(
-  initial?: DeviceRecord,
-  gpsTime = '2026-09-19T05:00:00.000Z',
-) {
+function fixture(initial?: DeviceRecord, gpsTime = '2026-09-19T05:00:00.000Z') {
   let record = initial;
   let committed = false;
   const db = {
@@ -20,7 +17,7 @@ function fixture(
       if (sql.includes('INSERT INTO devices') && typeof json === 'string') {
         record = JSON.parse(json) as DeviceRecord;
       }
-      return { rowCount: 1, changes: 1 };
+      return { rowCount: 1 };
     },
     get: async <T>(_sql: string): Promise<T | undefined> =>
       record ? ({ record } as T) : undefined,

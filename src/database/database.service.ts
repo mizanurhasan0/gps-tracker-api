@@ -1,26 +1,11 @@
-import {
-  Injectable,
-  Logger,
-  OnApplicationShutdown,
-  OnModuleInit,
-} from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Pool, PoolClient, QueryResultRow } from 'pg';
-import { paymentsSchema } from './payments.schema';
-import { schema } from './schema';
-import { managementSchema } from './management.schema';
-import { faresSchema } from './fares.schema';
-import { shiftsSchema } from './shifts.schema';
-import { bannersSchema } from './banners.schema';
-import { bannerLinksSchema } from './banner-links.schema';
-import { bannerRoutesSchema } from './banner-routes.schema';
-import { telegramSchema } from './telegram.schema';
+import { migrations } from './migrations';
 import { appConfig } from '../config/app.config';
 
 export interface MutationResult {
   rowCount: number;
-  /** Compatibility with existing affected-row checks. */
-  changes: number;
 }
 
 /** One pool and one transaction context for every application domain. */
@@ -35,9 +20,7 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
   constructor() {
     const url = appConfig.database.url;
     if (!url || !/^postgres(?:ql)?:\/\//.test(url)) {
-      throw new Error(
-        'DATABASE_URL is required and must be a PostgreSQL connection URL'
-      );
+      throw new Error('DATABASE_URL is required and must be a PostgreSQL connection URL');
     }
     this.pool = new Pool({
       connectionString: url,
@@ -48,9 +31,7 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
       query_timeout: 20000,
       idle_in_transaction_session_timeout: 20000,
     });
-    this.pool.on('error', () =>
-      this.logger.error('PostgreSQL connection unavailable')
-    );
+    this.pool.on('error', () => this.logger.error('PostgreSQL connection unavailable'));
   }
 
   async onModuleInit(): Promise<void> {
@@ -58,8 +39,7 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
   }
 
   ensureReady(): Promise<void> {
-    if (this.closing)
-      return Promise.reject(new Error('Database is shutting down'));
+    if (this.closing) return Promise.reject(new Error('Database is shutting down'));
     if (!this.initialization) {
       this.initialization = this.migrate().catch((error) => {
         this.initialization = undefined;
@@ -77,54 +57,20 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
       await client.query(`CREATE TABLE IF NOT EXISTS app_migrations (
         version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`);
-      const applied = await client.query(
-        'SELECT version FROM app_migrations WHERE version = 1'
-      );
-      if (!applied.rowCount) {
-        await client.query(schema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(1)');
-      }
-      const managementApplied = await client.query('SELECT version FROM app_migrations WHERE version = 2');
-      if (!managementApplied.rowCount) {
-        await client.query(managementSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(2)');
-      }
-      const faresApplied = await client.query('SELECT version FROM app_migrations WHERE version = 3');
-      if (!faresApplied.rowCount) {
-        await client.query(faresSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(3)');
-      }
-      const shiftsApplied = await client.query('SELECT version FROM app_migrations WHERE version = 4');
-      if (!shiftsApplied.rowCount) {
-        await client.query(shiftsSchema);
-        const legacyData = await client.query('SELECT 1 FROM users LIMIT 1');
-        if (!applied.rowCount && !legacyData.rowCount) await client.query("UPDATE business_settings SET data=jsonb_set(data,'{operatingDays}','[0,1,2,3,4,6]') WHERE id=1");
-        await client.query('INSERT INTO app_migrations(version) VALUES(4)');
-      }
-      const bannersApplied = await client.query('SELECT version FROM app_migrations WHERE version = 5');
-      if (!bannersApplied.rowCount) {
-        await client.query(bannersSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(5)');
-      }
-      const bannerLinksApplied = await client.query('SELECT version FROM app_migrations WHERE version = 6');
-      if (!bannerLinksApplied.rowCount) {
-        await client.query(bannerLinksSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(6)');
-      }
-      const bannerRoutesApplied = await client.query('SELECT version FROM app_migrations WHERE version = 7');
-      if (!bannerRoutesApplied.rowCount) {
-        await client.query(bannerRoutesSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(7)');
-      }
-      const telegramApplied = await client.query('SELECT version FROM app_migrations WHERE version = 8');
-      if (!telegramApplied.rowCount) {
-        await client.query(telegramSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(8)');
-      }
-      const paymentsApplied = await client.query('SELECT version FROM app_migrations WHERE version = 9');
-      if (!paymentsApplied.rowCount) {
-        await client.query(paymentsSchema);
-        await client.query('INSERT INTO app_migrations(version) VALUES(9)');
+      const applied = await client.query<{ version: number }>('SELECT version FROM app_migrations');
+      const appliedVersions = new Set(applied.rows.map((row) => row.version));
+      for (const [version, sql] of migrations) {
+        if (appliedVersions.has(version)) continue;
+        await client.query(sql);
+        // Preserve the fresh-install defaults without changing legacy schedules.
+        if (version === 4 && !appliedVersions.has(1)) {
+          const legacyData = await client.query('SELECT 1 FROM users LIMIT 1');
+          if (!legacyData.rowCount)
+            await client.query(
+              "UPDATE business_settings SET data=jsonb_set(data,'{operatingDays}','[0,1,2,3,4,6]') WHERE id=1",
+            );
+        }
+        await client.query('INSERT INTO app_migrations(version) VALUES($1)', [version]);
       }
       await client.query('COMMIT');
     } catch (error) {
@@ -135,10 +81,7 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
-  async all<T = Record<string, unknown>>(
-    sql: string,
-    ...params: unknown[]
-  ): Promise<T[]> {
+  async all<T = Record<string, unknown>>(sql: string, ...params: unknown[]): Promise<T[]> {
     await this.ensureReady();
     const executor = this.transactions.getStore() ?? this.pool;
     const result = await executor.query<QueryResultRow>(sql, params);
@@ -156,7 +99,7 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
     await this.ensureReady();
     const executor = this.transactions.getStore() ?? this.pool;
     const result = await executor.query(sql, params);
-    return { rowCount: result.rowCount ?? 0, changes: result.rowCount ?? 0 };
+    return { rowCount: result.rowCount ?? 0 };
   }
 
   async exec(sql: string): Promise<void> {

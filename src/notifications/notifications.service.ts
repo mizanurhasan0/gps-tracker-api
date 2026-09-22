@@ -30,16 +30,6 @@ interface TelegramDeliveryJob {
   attempts: number;
 }
 
-interface TelegramDeliveryRow {
-  id: string;
-  notificationId: string;
-  guardianId: string;
-  chatId: string;
-  title: string;
-  body: string;
-  attempts: number;
-}
-
 export interface Notification {
   id: string;
   userId: string;
@@ -51,9 +41,7 @@ export interface Notification {
   telegramStatus?: string;
 }
 @Injectable()
-export class NotificationsService
-  implements OnModuleInit, OnApplicationShutdown
-{
+export class NotificationsService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(NotificationsService.name);
   private deliveryTimer?: NodeJS.Timeout;
   private deliveryPass?: Promise<void>;
@@ -79,12 +67,7 @@ export class NotificationsService
     if (this.deliveryPass) await this.deliveryPass;
   }
 
-  async create(
-    userId: string,
-    title: string,
-    body: string,
-    entityId: string
-  ): Promise<void> {
+  async create(userId: string, title: string, body: string, entityId: string): Promise<void> {
     await this.db.transaction(async () => {
       const notificationId = randomUUID();
       const createdAt = new Date().toISOString();
@@ -122,7 +105,7 @@ export class NotificationsService
   }
   async admins(title: string, body: string, entityId: string): Promise<void> {
     for (const admin of await this.db.all<{ id: string }>(
-      "SELECT id FROM users WHERE role = 'ADMIN'"
+      "SELECT id FROM users WHERE role = 'ADMIN'",
     ))
       await this.create(admin.id, title, body, entityId);
   }
@@ -133,7 +116,7 @@ export class NotificationsService
        LEFT JOIN telegram_deliveries d ON d."notificationId" = n.id
        WHERE n."userId" = $1
        ORDER BY n."createdAt" DESC LIMIT 100`,
-      userId
+      userId,
     );
   }
   async read(userId: string, id: string): Promise<void> {
@@ -143,19 +126,14 @@ export class NotificationsService
           'UPDATE notifications SET "readAt" = COALESCE("readAt", $1) WHERE id = $2 AND "userId" = $3',
           new Date().toISOString(),
           id,
-          userId
+          userId,
         )
-      ).changes
+      ).rowCount
     ) {
       throw new NotFoundException('Notification not found');
     }
   }
-  async audit(
-    actorId: string,
-    action: string,
-    entityId: string,
-    note = ''
-  ): Promise<void> {
+  async audit(actorId: string, action: string, entityId: string, note = ''): Promise<void> {
     await this.db.run(
       'INSERT INTO audit_logs (id,"actorId",action,"entityId",note,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)',
       randomUUID(),
@@ -163,7 +141,7 @@ export class NotificationsService
       action,
       entityId,
       note,
-      new Date().toISOString()
+      new Date().toISOString(),
     );
   }
 
@@ -217,11 +195,7 @@ export class NotificationsService
           body: job.body,
         });
       } catch (error: unknown) {
-        await this.retryDelivery(
-          job,
-          error instanceof Error ? error.message : String(error),
-          true,
-        );
+        await this.retryDelivery(job, error instanceof Error ? error.message : String(error), true);
         continue;
       }
 
@@ -237,7 +211,7 @@ export class NotificationsService
 
   private claimDelivery(): Promise<TelegramDeliveryJob | undefined> {
     return this.db.transaction(async () => {
-      const row = await this.db.get<TelegramDeliveryRow>(
+      const row = await this.db.get<TelegramDeliveryJob>(
         `SELECT id, "notificationId", "guardianId", "chatId", title, body, attempts
          FROM telegram_deliveries
          WHERE ((status IN ('PENDING','FAILED') AND
@@ -280,9 +254,7 @@ export class NotificationsService
            "updatedAt" = now(), "lastError" = NULL
        WHERE id = $1 AND status = 'SENDING'`,
       id,
-      providerMessageId && /^\d+$/.test(providerMessageId)
-        ? Number(providerMessageId)
-        : null,
+      providerMessageId && /^\d+$/.test(providerMessageId) ? Number(providerMessageId) : null,
     );
   }
 

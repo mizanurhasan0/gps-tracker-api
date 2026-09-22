@@ -1,3 +1,5 @@
+import { dhakaDate, dhakaMinutes } from '../common/dhaka-time';
+import { groupBy } from '../common/collections';
 import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { appConfig } from '../config/app.config';
@@ -5,10 +7,7 @@ import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import type { SavedPosition } from '../locations/location.types';
 import { LocationsService } from '../locations/locations.service';
-import {
-  DEFAULT_GEOFENCE_CONFIG,
-  GeofenceService,
-} from './geofence.service';
+import { DEFAULT_GEOFENCE_CONFIG, GeofenceService } from './geofence.service';
 import type { RouteStopCoordinate } from './geofence.types';
 
 interface Assignment {
@@ -49,9 +48,7 @@ interface StateRow {
 
 /** Connects committed GPS fixes to route assignments and private notifications. */
 @Injectable()
-export class GeofenceCoordinator
-  implements OnModuleInit, OnApplicationShutdown
-{
+export class GeofenceCoordinator implements OnModuleInit, OnApplicationShutdown {
   private unregister?: () => void;
   private readonly evaluator: GeofenceService;
 
@@ -73,8 +70,8 @@ export class GeofenceCoordinator
   }
 
   onModuleInit(): void {
-    this.unregister = this.locations.registerPositionEvaluationHook(
-      position => this.evaluate(position),
+    this.unregister = this.locations.registerPositionEvaluationHook((position) =>
+      this.evaluate(position),
     );
   }
 
@@ -101,36 +98,33 @@ export class GeofenceCoordinator
          ]`,
       position.imei,
     );
+    if (!assignments.length) return;
     const settings = await this.db.get<SettingsRow>(
       'SELECT data FROM business_settings WHERE id=1',
     );
-    const eligible = assignments.filter(assignment =>
-      this.isShiftWindow(assignment.shiftId, position.receivedAt, settings),
+    const currentMinutes = dhakaMinutes(position.receivedAt);
+    const eligible = assignments.filter((assignment) =>
+      this.isShiftWindow(assignment.shiftId, currentMinutes, settings),
     );
 
-    const grouped = new Map<string, Assignment[]>();
-    for (const assignment of eligible) {
-      const key = `${assignment.routeId}:${assignment.vehicleId}:${assignment.shiftId}:${assignment.stopId}`;
-      const current = grouped.get(key) ?? [];
-      current.push(assignment);
-      grouped.set(key, current);
-    }
+    const grouped = groupBy(
+      eligible,
+      (assignment) =>
+        `${assignment.routeId}:${assignment.vehicleId}:${assignment.shiftId}:${assignment.stopId}`,
+    );
 
     for (const stopAssignments of grouped.values()) {
       await this.evaluateStop(position, stopAssignments);
     }
   }
 
-  private async evaluateStop(
-    position: SavedPosition,
-    assignments: Assignment[],
-  ): Promise<void> {
+  private async evaluateStop(position: SavedPosition, assignments: Assignment[]): Promise<void> {
     const first = assignments[0];
     // The state table is keyed by pickup_points.id, rather than stops.id. Read
     // it before locking state so every read/write uses the real foreign key.
     const pickupPoint = await this.findStopCoordinate(first.routeId, first.stopId);
     if (!pickupPoint) return;
-    const serviceDate = this.dhakaDate(position.receivedAt);
+    const serviceDate = dhakaDate(position.receivedAt);
     const trip = await this.db.get<TripRow>(
       `INSERT INTO geofence_trips
          (id,"routeId","vehicleId","shiftId","serviceDate",status,"startedAt")
@@ -156,33 +150,36 @@ export class GeofenceCoordinator
         trip.id,
         pickupPoint.pickupPointId,
       );
-      const result = await this.evaluator.evaluate({
-        tripId: trip.id,
-        routeId: first.routeId,
-        stopId: first.stopId,
-        vehiclePosition: position,
-        previousState: previous
-          ? {
-              tripId: trip.id,
-              routeId: first.routeId,
-              stopId: first.stopId,
-              phase: previous.state === 'INSIDE' ? 'inside' : 'outside',
-              notificationSent: previous.entryCount > 0,
-            }
-          : undefined,
-      });
+      const result = this.evaluator.evaluateAtStop(
+        {
+          tripId: trip.id,
+          routeId: first.routeId,
+          stopId: first.stopId,
+          vehiclePosition: position,
+          previousState: previous
+            ? {
+                tripId: trip.id,
+                routeId: first.routeId,
+                stopId: first.stopId,
+                phase: previous.state === 'INSIDE' ? 'inside' : 'outside',
+                notificationSent: previous.entryCount > 0,
+              }
+            : undefined,
+        },
+        pickupPoint,
+      );
       if (result.status !== 'evaluated' || !result.state) return result;
 
-      const entryCount = result.transition === 'enter'
-        ? (previous?.entryCount ?? 0) + 1
-        : previous?.entryCount ?? 0;
+      const entryCount =
+        result.transition === 'enter'
+          ? (previous?.entryCount ?? 0) + 1
+          : (previous?.entryCount ?? 0);
       const eventKey = `pickup:${trip.id}:${first.stopId}:${entryCount}`;
-      const enteredAt = result.transition === 'enter'
-        ? new Date().toISOString()
-        : previous?.lastEnteredAt ?? null;
-      const transitionAt = result.transition === 'none'
-        ? null
-        : new Date().toISOString();
+      const enteredAt =
+        result.transition === 'enter'
+          ? new Date().toISOString()
+          : (previous?.lastEnteredAt ?? null);
+      const transitionAt = result.transition === 'none' ? null : new Date().toISOString();
       await this.db.run(
         `INSERT INTO geofence_trip_states
            ("tripId","pickupPointId",state,"entryCount","lastLatitude",
@@ -248,39 +245,16 @@ export class GeofenceCoordinator
     return row ?? null;
   }
 
-  private dhakaDate(value: string): string {
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Dhaka',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(new Date(value));
-  }
-
-  private isShiftWindow(
-    shiftId: string,
-    timestamp: string,
-    settings?: SettingsRow,
-  ): boolean {
-    const shift = settings?.data.transportShifts?.find(item => item.id === shiftId);
+  private isShiftWindow(shiftId: string, current: number, settings?: SettingsRow): boolean {
+    const shift = settings?.data.transportShifts?.find((item) => item.id === shiftId);
     // Legacy installations may not have configured shift times. Operating-day
     // filtering still applies, and the alert remains useful in that case.
     if (!shift) return true;
-    const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone: 'Asia/Dhaka',
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).formatToParts(new Date(timestamp));
-    const hour = Number(parts.find(part => part.type === 'hour')?.value);
-    const minute = Number(parts.find(part => part.type === 'minute')?.value);
-    const current = hour * 60 + minute;
     const parse = (value: string) => {
       const [h, m] = value.split(':').map(Number);
       return h * 60 + m;
     };
     const window = appConfig.telegram.geofenceTimeWindowMinutes;
-    return current >= parse(shift.startTime) - window &&
-      current <= parse(shift.endTime) + window;
+    return current >= parse(shift.startTime) - window && current <= parse(shift.endTime) + window;
   }
 }

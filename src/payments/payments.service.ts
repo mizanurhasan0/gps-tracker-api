@@ -1,3 +1,4 @@
+import { dhakaMonth } from '../common/dhaka-time';
 import {
   BadRequestException,
   ConflictException,
@@ -42,26 +43,18 @@ export interface PaymentAccount {
   number: string;
   instructions: string;
 }
-/** Bangladesh billing month, independent of the server's local timezone. */
-export function billingMonth(date = new Date()): string {
-  return new Date(date.getTime() + 6 * 60 * 60_000).toISOString().slice(0, 7);
-}
 @Injectable()
 export class PaymentsService {
   constructor(
     private readonly db: DatabaseService,
-    private readonly notifications: NotificationsService
+    private readonly notifications: NotificationsService,
   ) {}
 
   async accounts(): Promise<PaymentAccount[]> {
     return await this.db.all('SELECT * FROM payment_accounts ORDER BY name, method');
   }
 
-  async setAccount(
-    actor: User,
-    method: string,
-    input: PaymentAccountDto
-  ): Promise<void> {
+  async setAccount(actor: User, method: string, input: PaymentAccountDto): Promise<void> {
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(method))
       throw new BadRequestException('Invalid payment method');
     await this.db.transaction(async () => {
@@ -75,19 +68,14 @@ export class PaymentsService {
         input.name ?? (method === 'BKASH' ? 'bKash' : method === 'ROCKET' ? 'Rocket' : method),
         input.imageUrl ?? '',
         input.imageUrl ?? null,
-        input.name ?? null
+        input.name ?? null,
       );
       await this.db.run(
         `INSERT INTO payment_account_history (method,number) VALUES ($1,$2) ON CONFLICT(method,number) DO NOTHING`,
         method,
-        input.number
+        input.number,
       );
-      await this.notifications.audit(
-        actor.id,
-        'PAYMENT_ACCOUNT_UPDATED',
-        method,
-        input.number
-      );
+      await this.notifications.audit(actor.id, 'PAYMENT_ACCOUNT_UPDATED', method, input.number);
     });
   }
 
@@ -106,7 +94,7 @@ export class PaymentsService {
       user.role,
       user.id,
       month ?? null,
-      month ?? null
+      month ?? null,
     );
   }
 
@@ -124,16 +112,12 @@ export class PaymentsService {
       JOIN subscriptions s ON s.id = b."subscriptionId"
       WHERE ($1::text = 'ADMIN' OR p."guardianId" = $2) ORDER BY p."createdAt" DESC`,
       user.role,
-      user.id
+      user.id,
     );
   }
 
-  async generateBills(
-    actor: User,
-    month: string
-  ): Promise<{ created: number }> {
-    if (month > billingMonth())
-      throw new BadRequestException('Future bills cannot be generated');
+  async generateBills(actor: User, month: string): Promise<{ created: number }> {
+    if (month > dhakaMonth()) throw new BadRequestException('Future bills cannot be generated');
     return this.db.transaction(async () => {
       const subscriptions = await this.db.all<{
         id: string;
@@ -145,7 +129,7 @@ export class PaymentsService {
         WHERE to_char("startedAt"::timestamptz AT TIME ZONE 'Asia/Dhaka', 'YYYY-MM') <= $1
         AND ("stoppedAt" IS NULL OR to_char("stoppedAt"::timestamptz AT TIME ZONE 'Asia/Dhaka', 'YYYY-MM') >= $2)`,
         month,
-        month
+        month,
       );
       let created = 0;
       for (const subscription of subscriptions) {
@@ -158,86 +142,72 @@ export class PaymentsService {
           subscription.id,
           month,
           subscription.monthlyAmount,
-          new Date().toISOString()
+          new Date().toISOString(),
         );
-        if (result.changes) {
+        if (result.rowCount) {
           created++;
           await this.notifications.create(
             subscription.guardianId,
             'Monthly bill ready',
             `${subscription.studentName}: your ${month} transport bill is ready.`,
-            id
+            id,
           );
         }
       }
-      await this.notifications.audit(
-        actor.id,
-        'BILLS_GENERATED',
-        month,
-        `${created} bills`
-      );
+      await this.notifications.audit(actor.id, 'BILLS_GENERATED', month, `${created} bills`);
       return { created };
     });
   }
 
-  async submit(
-    user: User,
-    input: PaymentSubmissionDto
-  ): Promise<PaymentSubmission> {
+  async submit(user: User, input: PaymentSubmissionDto): Promise<PaymentSubmission> {
     this.requireProof(input);
     return this.db
       .transaction(async () => {
         const bill = await this.db.get<Bill>(
           `SELECT * FROM bills WHERE id = $1 AND "guardianId" = $2`,
           input.billId,
-          user.id
+          user.id,
         );
         if (!bill) throw new NotFoundException('Bill not found');
-        if (bill.status === 'PAID')
-          throw new ConflictException('This bill is already paid');
+        if (bill.status === 'PAID') throw new ConflictException('This bill is already paid');
         if (bill.amount !== input.amount)
           throw new BadRequestException(
-            'Send the full bill amount. Partial payments are not supported yet'
+            'Send the full bill amount. Partial payments are not supported yet',
           );
         const account = await this.db.get<PaymentAccount>(
           `SELECT * FROM payment_accounts WHERE method = $1`,
-          input.method
+          input.method,
         );
         if (!account)
-          throw new BadRequestException(
-            'This payment method is not configured. Contact the admin'
-          );
+          throw new BadRequestException('This payment method is not configured. Contact the admin');
         if (
           !(await this.db.get(
             `SELECT number FROM payment_account_history WHERE method = $1 AND number = $2`,
             input.method,
-            input.recipientNumber
+            input.recipientNumber,
           ))
         ) {
           throw new BadRequestException(
-            'This receiving number is not an admin payment account. Contact the admin before sending money'
+            'This receiving number is not an admin payment account. Contact the admin before sending money',
           );
         }
         if (
           await this.db.get(
             `SELECT id FROM payment_submissions WHERE "billId" = $1 AND status = 'PENDING'`,
-            bill.id
+            bill.id,
           )
         ) {
-          throw new ConflictException(
-            'This bill already has a submission awaiting review'
-          );
+          throw new ConflictException('This bill already has a submission awaiting review');
         }
         if (
-          input.transactionId && await this.db.get(
+          input.transactionId &&
+          (await this.db.get(
             `SELECT id FROM payment_submissions WHERE method = $1 AND lower("transactionId") = lower($2) AND status != 'REJECTED'`,
             input.method,
-            input.transactionId
-          )
+            input.transactionId,
+          ))
         ) {
-          throw new ConflictException(
-            'This transaction ID has already been submitted'
-          );
+          throw new ConflictException('This transaction ID has already been submitted');
         }
         const id = randomUUID();
         await this.db.run(
@@ -255,36 +225,26 @@ export class PaymentsService {
           new Date().toISOString(),
           account.name,
           input.evidenceImageUrl ?? '',
-          input.transactionInfo ?? ''
+          input.transactionInfo ?? '',
         );
         await this.notifications.admins(
           'Payment needs verification',
           `${user.name} submitted a ${account.name} payment for ${bill.month}.`,
-          id
+          id,
         );
         await this.notifications.audit(user.id, 'PAYMENT_SUBMITTED', id);
         return (await this.db.get<PaymentSubmission>(
           `SELECT * FROM payment_submissions WHERE id = $1`,
-          id
+          id,
         ))!;
       })
       .catch((error: unknown) => {
-        if (
-          error &&
-          typeof error === 'object' &&
-          'code' in error &&
-          error.code === '23505'
-        ) {
-          const constraint =
-            'constraint' in error ? String(error.constraint) : '';
+        if (error && typeof error === 'object' && 'code' in error && error.code === '23505') {
+          const constraint = 'constraint' in error ? String(error.constraint) : '';
           if (constraint === 'pending_payment')
-            throw new ConflictException(
-              'This bill already has a submission awaiting review'
-            );
+            throw new ConflictException('This bill already has a submission awaiting review');
           if (constraint === 'reserved_transaction')
-            throw new ConflictException(
-              'This transaction ID has already been submitted'
-            );
+            throw new ConflictException('This transaction ID has already been submitted');
         }
         throw error;
       });
@@ -298,16 +258,22 @@ export class PaymentsService {
   async updateEvidence(user: User, id: string, input: PaymentEvidenceDto) {
     return this.db.transaction(async () => {
       const payment = await this.db.get<PaymentSubmission>(
-        `SELECT * FROM payment_submissions WHERE id=$1 AND "guardianId"=$2 FOR UPDATE`, id, user.id
+        `SELECT * FROM payment_submissions WHERE id=$1 AND "guardianId"=$2 FOR UPDATE`,
+        id,
+        user.id,
       );
       if (!payment) throw new NotFoundException('Payment submission not found');
-      if (payment.status !== 'PENDING') throw new ConflictException('This payment has already been reviewed');
+      if (payment.status !== 'PENDING')
+        throw new ConflictException('This payment has already been reviewed');
       const next = { ...payment, ...input };
       this.requireProof(next);
       try {
         await this.db.run(
           `UPDATE payment_submissions SET "transactionId"=$1,"evidenceImageUrl"=$2,"transactionInfo"=$3 WHERE id=$4`,
-          next.transactionId ?? '', next.evidenceImageUrl ?? '', next.transactionInfo ?? '', id
+          next.transactionId ?? '',
+          next.evidenceImageUrl ?? '',
+          next.transactionInfo ?? '',
+          id,
         );
       } catch (error) {
         if ((error as { code?: string }).code === '23505')
@@ -319,22 +285,15 @@ export class PaymentsService {
     });
   }
 
-  async review(
-    actor: User,
-    id: string,
-    input: DecisionDto
-  ): Promise<PaymentSubmission> {
+  async review(actor: User, id: string, input: DecisionDto): Promise<PaymentSubmission> {
     if (input.decision === 'REJECTED' && !input.note?.trim())
-      throw new BadRequestException(
-        'Please explain why this payment was rejected'
-      );
+      throw new BadRequestException('Please explain why this payment was rejected');
     return this.db.transaction(async () => {
       const submission = await this.db.get<PaymentSubmission>(
         `SELECT * FROM payment_submissions WHERE id = $1 FOR UPDATE`,
-        id
+        id,
       );
-      if (!submission)
-        throw new NotFoundException('Payment submission not found');
+      if (!submission) throw new NotFoundException('Payment submission not found');
       if (submission.status !== 'PENDING')
         throw new ConflictException('This payment has already been reviewed');
       const now = new Date().toISOString();
@@ -342,10 +301,9 @@ export class PaymentsService {
         const result = await this.db.run(
           `UPDATE bills SET status = 'PAID', "paidAt" = $1 WHERE id = $2 AND status = 'UNPAID'`,
           now,
-          submission.billId
+          submission.billId,
         );
-        if (!result.changes)
-          throw new ConflictException('This bill is already paid');
+        if (!result.rowCount) throw new ConflictException('This bill is already paid');
       }
       await this.db.run(
         `UPDATE payment_submissions SET status = $1, note = $2, "reviewedBy" = $3, "reviewedAt" = $4 WHERE id = $5`,
@@ -353,27 +311,20 @@ export class PaymentsService {
         input.note ?? '',
         actor.id,
         now,
-        id
+        id,
       );
       await this.notifications.create(
         submission.guardianId,
-        input.decision === 'APPROVED'
-          ? 'Payment completed'
-          : 'Payment needs correction',
+        input.decision === 'APPROVED' ? 'Payment completed' : 'Payment needs correction',
         input.decision === 'APPROVED'
           ? 'The admin verified your payment. Your monthly bill is now paid.'
           : `Admin note: ${input.note}. You can submit corrected details.`,
-        id
-      );
-      await this.notifications.audit(
-        actor.id,
-        `PAYMENT_${input.decision}`,
         id,
-        input.note
       );
+      await this.notifications.audit(actor.id, `PAYMENT_${input.decision}`, id, input.note);
       return (await this.db.get<PaymentSubmission>(
         `SELECT * FROM payment_submissions WHERE id = $1`,
-        id
+        id,
       ))!;
     });
   }

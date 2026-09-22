@@ -4,6 +4,7 @@ import type {
   GeofenceEvaluationInput,
   GeofenceEvaluationResult,
   GeofenceState,
+  RouteStopCoordinate,
   RouteStopCoordinateLookup,
 } from './geofence.types';
 
@@ -29,15 +30,19 @@ export class GeofenceService {
     this.config = normalizeConfig(config);
   }
 
-  async evaluate(
-    input: GeofenceEvaluationInput,
-  ): Promise<GeofenceEvaluationResult> {
+  async evaluate(input: GeofenceEvaluationInput): Promise<GeofenceEvaluationResult> {
     validateInput(input);
 
-    const stop = await this.stopLookup.findStopCoordinate(
-      input.routeId,
-      input.stopId,
-    );
+    const stop = await this.stopLookup.findStopCoordinate(input.routeId, input.stopId);
+    return this.evaluateAtStop(input, stop);
+  }
+
+  /** Evaluate an already loaded stop without a second database lookup. */
+  evaluateAtStop(
+    input: GeofenceEvaluationInput,
+    stop: RouteStopCoordinate | null,
+  ): GeofenceEvaluationResult {
+    validateInput(input);
 
     // Missing coordinates must not create an exit or notification. Keeping the
     // previous state lets a temporary route-data issue recover safely.
@@ -61,22 +66,13 @@ export class GeofenceService {
     }
 
     const config = normalizeConfig({
-      enterRadiusMeters:
-        stop.enterRadiusMeters ?? this.config.enterRadiusMeters,
-      exitRadiusMeters:
-        stop.exitRadiusMeters ?? this.config.exitRadiusMeters,
+      enterRadiusMeters: stop.enterRadiusMeters ?? this.config.enterRadiusMeters,
+      exitRadiusMeters: stop.exitRadiusMeters ?? this.config.exitRadiusMeters,
     });
 
-    const distanceMeters = haversineDistanceMeters(
-      input.vehiclePosition,
-      stop,
-    );
+    const distanceMeters = haversineDistanceMeters(input.vehiclePosition, stop);
     const state = stateForInput(input);
-    const transition = transitionForDistance(
-      state.phase,
-      distanceMeters,
-      config,
-    );
+    const transition = transitionForDistance(state.phase, distanceMeters, config);
 
     if (transition === 'enter') {
       const shouldNotify = !state.notificationSent;
@@ -107,10 +103,8 @@ export class GeofenceService {
 }
 
 function normalizeConfig(config: GeofenceConfig): Required<GeofenceConfig> {
-  const enterRadiusMeters =
-    config.enterRadiusMeters ?? DEFAULT_GEOFENCE_CONFIG.enterRadiusMeters;
-  const exitRadiusMeters =
-    config.exitRadiusMeters ?? DEFAULT_GEOFENCE_CONFIG.exitRadiusMeters;
+  const enterRadiusMeters = config.enterRadiusMeters ?? DEFAULT_GEOFENCE_CONFIG.enterRadiusMeters;
+  const exitRadiusMeters = config.exitRadiusMeters ?? DEFAULT_GEOFENCE_CONFIG.exitRadiusMeters;
 
   if (
     !Number.isFinite(enterRadiusMeters) ||

@@ -5,7 +5,6 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { HistoryRepository } from './history.repository';
-import { HistoryIngestion } from './history.ingestion';
 import {
   disconnected,
   distanceMeters,
@@ -27,15 +26,13 @@ interface Cursor {
 
 @Injectable()
 export class HistoryService {
-  constructor(
-    private readonly repository: HistoryRepository,
-    private readonly ingestion: HistoryIngestion
-  ) {}
+  constructor(private readonly repository: HistoryRepository) {}
 
   private metadata(range: HistoryRange) {
     return {
       ...range,
-      freshness: this.ingestion.freshness(range.imei, range.from, range.to),
+      // All accepted reports are committed; there is no local ingestion queue.
+      freshness: { pendingPoints: 0, oldestPendingAt: null, complete: true },
     };
   }
 
@@ -43,14 +40,9 @@ export class HistoryService {
     try {
       return await work();
     } catch (error) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof PayloadTooLargeException
-      )
+      if (error instanceof BadRequestException || error instanceof PayloadTooLargeException)
         throw error;
-      throw new ServiceUnavailableException(
-        'GPS history is temporarily unavailable'
-      );
+      throw new ServiceUnavailableException('GPS history is temporarily unavailable');
     }
   }
 
@@ -66,9 +58,7 @@ export class HistoryService {
           !/^[A-Za-z0-9_-]+$/.test(query.cursor)
         )
           throw new Error();
-        cursor = JSON.parse(
-          Buffer.from(query.cursor, 'base64url').toString('utf8')
-        ) as Cursor;
+        cursor = JSON.parse(Buffer.from(query.cursor, 'base64url').toString('utf8')) as Cursor;
         if (
           !cursor ||
           cursor.imei !== imei ||
@@ -83,20 +73,13 @@ export class HistoryService {
         )
           throw new Error();
       } catch {
-        throw new BadRequestException(
-          'Invalid cursor or cursor does not match this device/range'
-        );
+        throw new BadRequestException('Invalid cursor or cursor does not match this device/range');
       }
     }
     return this.available(async () => {
       const metadata = this.metadata(range);
       const snapshot = cursor?.snapshot ?? (await this.repository.snapshot());
-      const values = await this.repository.points(
-        range,
-        snapshot,
-        limit + 1,
-        cursor
-      );
+      const values = await this.repository.points(range, snapshot, limit + 1, cursor);
       const points = values.slice(0, limit);
       const last = points[points.length - 1];
       const nextCursor =
@@ -109,7 +92,7 @@ export class HistoryService {
                 snapshot,
                 time: last.gpsTime,
                 id: last.id,
-              })
+              }),
             ).toString('base64url')
           : null;
       return { ...metadata, points, nextCursor, snapshot };
@@ -124,41 +107,30 @@ export class HistoryService {
       const days = summarize([], range.from, range.to);
       const groups = new Map(days.map((day) => [day.date, day]));
       let previous: HistoryPoint | undefined;
+      let previousDate: string | undefined;
       for await (const points of this.batches(range, snapshot))
         for (const point of points) {
-          const date = new Date(Date.parse(point.gpsTime) + 6 * 3600000)
-            .toISOString()
-            .slice(0, 10);
+          const date = new Date(Date.parse(point.gpsTime) + 6 * 3600000).toISOString().slice(0, 10);
           const day = groups.get(date)!;
           day.pointCount++;
           day.firstAt ??= point.gpsTime;
           day.lastAt = point.gpsTime;
-          if (
-            previous &&
-            new Date(Date.parse(previous.gpsTime) + 6 * 3600000)
-              .toISOString()
-              .slice(0, 10) === date
-          ) {
-            if (disconnected(previous, point)) day.gapCount++;
-            else day.distanceMeters += distanceMeters(previous, point);
+          if (previous && previousDate === date) {
+            const distance = distanceMeters(previous, point);
+            if (disconnected(previous, point, distance)) day.gapCount++;
+            else day.distanceMeters += distance;
           }
           previous = point;
+          previousDate = date;
         }
-      for (const day of days)
-        day.distanceMeters = Math.round(day.distanceMeters);
+      for (const day of days) day.distanceMeters = Math.round(day.distanceMeters);
       return { ...metadata, days, snapshot };
     });
   }
 
   async route(imei: string, query: Record<string, unknown>) {
     const range = validateRange(imei, query);
-    const maxPoints = integerOption(
-      query.maxPoints,
-      2000,
-      2,
-      2000,
-      'maxPoints'
-    );
+    const maxPoints = integerOption(query.maxPoints, 2000, 2, 2000, 'maxPoints');
     return this.available(async () => {
       const metadata = this.metadata(range);
       const snapshot = await this.repository.snapshot();
@@ -177,7 +149,8 @@ export class HistoryService {
       for await (const points of this.batches(range, snapshot))
         for (const point of points) {
           pointCount++;
-          if (!previous || disconnected(previous, point)) {
+          const distance = previous ? distanceMeters(previous, point) : 0;
+          if (!previous || disconnected(previous, point, distance)) {
             if (previous) {
               gapCount++;
               keepPrevious();
@@ -185,21 +158,17 @@ export class HistoryService {
             segments.push({ points: [point] });
             if (segments.length > maxPoints)
               throw new PayloadTooLargeException(
-                'Too many disconnected segments; select a shorter period'
+                'Too many disconnected segments; select a shorter period',
               );
           } else {
-            totalDistance += distanceMeters(previous, point);
-            if ((pointCount - 1) % stride === 0)
-              segments[segments.length - 1].points.push(point);
+            totalDistance += distance;
+            if ((pointCount - 1) % stride === 0) segments[segments.length - 1].points.push(point);
           }
           previous = point;
         }
       keepPrevious();
       segments = sampleSegments(segments, maxPoints);
-      const displayedPointCount = segments.reduce(
-        (sum, s) => sum + s.points.length,
-        0
-      );
+      const displayedPointCount = segments.reduce((sum, s) => sum + s.points.length, 0);
       return {
         ...metadata,
         segments,

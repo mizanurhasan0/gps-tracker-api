@@ -12,7 +12,6 @@ import { TelegramService } from '../src/telegram/telegram.service';
 
 interface MutationResult {
   rowCount: number;
-  changes: number;
 }
 
 class TelegramDatabaseStub {
@@ -51,34 +50,30 @@ class TelegramDatabaseStub {
     this.calls.push({ sql, params });
     if (sql.includes('INSERT INTO telegram_webhook_updates')) {
       const updateId = Number(params[0]);
-      if (this.processedUpdates.has(updateId)) return { rowCount: 0, changes: 0 };
+      if (this.processedUpdates.has(updateId)) return { rowCount: 0 };
       this.processedUpdates.add(updateId);
-      return { rowCount: 1, changes: 1 };
+      return { rowCount: 1 };
     }
     if (sql.includes('INSERT INTO telegram_link_tokens')) {
       this.insertedTokens.push(String(params[1]));
-      return { rowCount: 1, changes: 1 };
+      return { rowCount: 1 };
     }
     if (sql.includes('UPDATE telegram_link_tokens')) {
-      if (this.tokenUsed) return { rowCount: 0, changes: 0 };
+      if (this.tokenUsed) return { rowCount: 0 };
       this.tokenUsed = true;
-      return { rowCount: 1, changes: 1 };
+      return { rowCount: 1 };
     }
     if (sql.includes('INSERT INTO telegram_connections')) {
-      if (this.connectionInserted) return { rowCount: 0, changes: 0 };
+      if (this.connectionInserted) return { rowCount: 0 };
       this.connectionInserted = true;
-      return { rowCount: 1, changes: 1 };
+      return { rowCount: 1 };
     }
-    return { rowCount: 1, changes: 1 };
+    return { rowCount: 1 };
   }
 }
 
 function configureTelegramEnvironment(): Record<string, string | undefined> {
-  const keys = [
-    'TELEGRAM_BOT_TOKEN',
-    'TELEGRAM_BOT_USERNAME',
-    'TELEGRAM_API_BASE_URL',
-  ];
+  const keys = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_BOT_USERNAME', 'TELEGRAM_API_BASE_URL'];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   process.env.TELEGRAM_BOT_TOKEN = '123456:unit-test-token';
   process.env.TELEGRAM_BOT_USERNAME = 'test_vehicle_bot';
@@ -164,10 +159,10 @@ test('Telegram long polling removes webhooks and requests message updates', asyn
       method,
       body: JSON.parse(String(init?.body)) as Record<string, unknown>,
     });
-    return new Response(
-      JSON.stringify({ ok: true, result: method === 'getUpdates' ? [] : true }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    );
+    return new Response(JSON.stringify({ ok: true, result: method === 'getUpdates' ? [] : true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
   };
 
   const service = new TelegramService(telegramDb() as never);
@@ -185,15 +180,33 @@ test('Telegram long polling removes webhooks and requests message updates', asyn
 });
 
 test('Telegram guardian endpoints require the GUARDIAN role', async () => {
-  assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.connect), ['GUARDIAN']);
+  assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.connect), [
+    'GUARDIAN',
+  ]);
   assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.status), ['GUARDIAN']);
-  assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.disconnect), ['GUARDIAN']);
+  assert.deepEqual(Reflect.getMetadata('roles', TelegramController.prototype.disconnect), [
+    'GUARDIAN',
+  ]);
 
   const adminAuth = {
-    authenticate: async () => ({ id: 'admin', name: 'Admin', phone: '1', role: 'ADMIN', verified: 1, createdAt: '' }),
+    authenticate: async () => ({
+      id: 'admin',
+      name: 'Admin',
+      phone: '1',
+      role: 'ADMIN',
+      verified: 1,
+      createdAt: '',
+    }),
   } as unknown as AuthService;
   const guardianAuth = {
-    authenticate: async () => ({ id: 'guardian', name: 'Guardian', phone: '2', role: 'GUARDIAN', verified: 1, createdAt: '' }),
+    authenticate: async () => ({
+      id: 'guardian',
+      name: 'Guardian',
+      phone: '2',
+      role: 'GUARDIAN',
+      verified: 1,
+      createdAt: '',
+    }),
   } as unknown as AuthService;
   const reflector = new Reflector();
   const context = (handler: (...args: never[]) => unknown, authHeader: string): ExecutionContext =>
@@ -211,7 +224,60 @@ test('Telegram guardian endpoints require the GUARDIAN role', async () => {
   );
   const guardianGuard = new AuthGuard(guardianAuth, reflector);
   assert.equal(
-    await guardianGuard.canActivate(context(TelegramController.prototype.connect, 'Bearer guardian-token')),
+    await guardianGuard.canActivate(
+      context(TelegramController.prototype.connect, 'Bearer guardian-token'),
+    ),
     true,
   );
+});
+
+test('queued Telegram delivery rechecks the connected chat before sending', async () => {
+  let connected = false;
+  let sends = 0;
+  const message = {
+    notificationId: 'notification-1',
+    userId: 'guardian-1',
+    chatId: '88001',
+    title: 'Pickup alert',
+    body: 'The bus is nearby.',
+  };
+  const service = new TelegramService({
+    get: async (_sql: string, ...params: unknown[]) => {
+      assert.deepEqual(params, [message.userId, message.chatId]);
+      return connected ? { chatId: message.chatId } : undefined;
+    },
+  } as never);
+  globalThis.fetch = async (_url, options) => {
+    sends++;
+    assert.deepEqual(JSON.parse(String(options?.body)), {
+      chat_id: message.chatId,
+      text: `${message.title}\n\n${message.body}`,
+    });
+    return Response.json({ ok: true, result: { message_id: 7 } });
+  };
+  assert.equal((await service.deliver(message)).status, 'SKIPPED');
+  assert.equal(sends, 0);
+  connected = true;
+  assert.deepEqual(await service.deliver(message), { status: 'SENT', providerMessageId: '7' });
+  assert.equal(sends, 1);
+  connected = false;
+  assert.equal((await service.deliver(message)).status, 'SKIPPED');
+  assert.equal(sends, 1);
+});
+
+test('Telegram delivery skips permanent recipient failures and retries provider outages', async () => {
+  const service = new TelegramService({ get: async () => ({ chatId: '88001' }) } as never);
+  const message = {
+    notificationId: 'notification-1',
+    userId: 'guardian-1',
+    chatId: '88001',
+    title: 'Alert',
+    body: 'Nearby',
+  };
+  globalThis.fetch = async () =>
+    Response.json({ ok: false, description: 'Bot blocked' }, { status: 403 });
+  assert.equal((await service.deliver(message)).status, 'SKIPPED');
+  globalThis.fetch = async () =>
+    Response.json({ ok: false, description: 'Unavailable' }, { status: 503 });
+  assert.equal((await service.deliver(message)).status, 'RETRY');
 });

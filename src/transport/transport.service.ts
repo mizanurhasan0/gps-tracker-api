@@ -1,3 +1,4 @@
+import { groupBy } from '../common/collections';
 import {
   BadRequestException,
   ConflictException,
@@ -11,7 +12,13 @@ import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
 import { journeyFare } from './journey-fare';
-import { assertAvailableShift, resolveSchedule, resolveStudent, sharedProfileFields, overlapWarnings } from './student-schedule';
+import {
+  assertAvailableShift,
+  resolveSchedule,
+  resolveStudent,
+  sharedProfileFields,
+  overlapWarnings,
+} from './student-schedule';
 import {
   ComplaintDto,
   ComplaintReviewDto,
@@ -42,11 +49,11 @@ interface Route {
 export class TransportService {
   constructor(
     private readonly db: DatabaseService,
-    private readonly notifications: NotificationsService
+    private readonly notifications: NotificationsService,
   ) {}
   async routes() {
     const routes = await this.db.all<Route>(
-      `SELECT r.*,v.name "vehicleName" FROM routes r JOIN vehicles v ON v.id = r."vehicleId" WHERE r.active = 1 ORDER BY r.name`
+      `SELECT r.*,v.name "vehicleName" FROM routes r JOIN vehicles v ON v.id = r."vehicleId" WHERE r.active = 1 ORDER BY r.name`,
     );
     const stops = await this.db.all<{
       id: string;
@@ -60,11 +67,19 @@ export class TransportService {
           p."enterRadiusMeters",p."exitRadiusMeters"
        FROM stops s LEFT JOIN pickup_points p ON p."stopId"=s.id
        ORDER BY s.position,s.id`);
-    const stopsByRoute = new Map<string, {
-      id: string;
-      name: string;
-      pickupPoint?: { latitude: number; longitude: number; enterRadiusMeters: number; exitRadiusMeters: number };
-    }[]>();
+    const stopsByRoute = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        pickupPoint?: {
+          latitude: number;
+          longitude: number;
+          enterRadiusMeters: number;
+          exitRadiusMeters: number;
+        };
+      }[]
+    >();
     for (const stop of stops) {
       const entries = stopsByRoute.get(stop.routeId) ?? [];
       entries.push({
@@ -83,14 +98,20 @@ export class TransportService {
       });
       stopsByRoute.set(stop.routeId, entries);
     }
-    const fares = await this.db.all<{ routeId: string; boardingStopId: string; dropoffStopId: string; monthlyAmount: number }>(
+    const fares = await this.db.all<{
+      routeId: string;
+      boardingStopId: string;
+      dropoffStopId: string;
+      monthlyAmount: number;
+    }>(
       `SELECT f.* FROM route_fares f JOIN stops b ON b.id=f."boardingStopId" JOIN stops d ON d.id=f."dropoffStopId"
        ORDER BY b.position,d.position,f."boardingStopId",f."dropoffStopId"`,
     );
+    const faresByRoute = groupBy(fares, (fare) => fare.routeId);
     return routes.map((route) => ({
       ...route,
       stops: stopsByRoute.get(route.id) ?? [],
-      fares: fares.filter(fare => fare.routeId === route.id).map(({ routeId, ...fare }) => fare),
+      fares: (faresByRoute.get(route.id) ?? []).map(({ routeId, ...fare }) => fare),
     }));
   }
 
@@ -128,12 +149,7 @@ export class TransportService {
   }
   async createRoute(actor: User, input: CreateRouteDto) {
     return this.transaction(async () => {
-      if (
-        !(await this.db.get(
-          `SELECT id FROM vehicles WHERE id = $1`,
-          input.vehicleId
-        ))
-      )
+      if (!(await this.db.get(`SELECT id FROM vehicles WHERE id = $1`, input.vehicleId)))
         throw new BadRequestException('Vehicle does not exist');
       const id = randomUUID();
       await this.db.run(
@@ -141,7 +157,7 @@ export class TransportService {
         id,
         input.name,
         input.vehicleId,
-        input.monthlyAmount
+        input.monthlyAmount,
       );
       for (const [position, stop] of input.stops.entries())
         await this.db.run(
@@ -149,7 +165,7 @@ export class TransportService {
           randomUUID(),
           id,
           stop,
-          position
+          position,
         );
       await this.notifications.audit(actor.id, 'ROUTE_CREATED', id);
       return (await this.routes()).find((route) => route.id === id)!;
@@ -159,8 +175,11 @@ export class TransportService {
     return this.transaction(async () => {
       if (!(await this.db.get('SELECT id FROM routes WHERE id=$1 AND active=1', routeId)))
         throw new NotFoundException('Active route not found');
-      const stops = await this.db.all<{ id: string }>('SELECT id FROM stops WHERE "routeId"=$1', routeId);
-      const ids = new Set(stops.map(stop => stop.id));
+      const stops = await this.db.all<{ id: string }>(
+        'SELECT id FROM stops WHERE "routeId"=$1',
+        routeId,
+      );
+      const ids = new Set(stops.map((stop) => stop.id));
       const pairs = new Set<string>();
       for (const fare of input.fares) {
         if (!ids.has(fare.boardingStopId) || !ids.has(fare.dropoffStopId))
@@ -168,16 +187,26 @@ export class TransportService {
         if (fare.boardingStopId === fare.dropoffStopId)
           throw new BadRequestException('Boarding and destination must be different stops');
         const pair = `${fare.boardingStopId}:${fare.dropoffStopId}`;
-        if (pairs.has(pair)) throw new BadRequestException('Each boarding and destination pair must be unique');
+        if (pairs.has(pair))
+          throw new BadRequestException('Each boarding and destination pair must be unique');
         pairs.add(pair);
       }
       await this.db.run('DELETE FROM route_fares WHERE "routeId"=$1', routeId);
       for (const fare of input.fares)
-        await this.db.run('INSERT INTO route_fares("routeId","boardingStopId","dropoffStopId","monthlyAmount") VALUES($1,$2,$3,$4)',
-          routeId, fare.boardingStopId, fare.dropoffStopId, fare.monthlyAmount);
-      await this.notifications.audit(actor.id, 'ROUTE_FARES_UPDATED', routeId,
-        'Existing subscriptions and issued bills retain their assigned amounts');
-      return (await this.routes()).find(route => route.id === routeId)!;
+        await this.db.run(
+          'INSERT INTO route_fares("routeId","boardingStopId","dropoffStopId","monthlyAmount") VALUES($1,$2,$3,$4)',
+          routeId,
+          fare.boardingStopId,
+          fare.dropoffStopId,
+          fare.monthlyAmount,
+        );
+      await this.notifications.audit(
+        actor.id,
+        'ROUTE_FARES_UPDATED',
+        routeId,
+        'Existing subscriptions and issued bills retain their assigned amounts',
+      );
+      return (await this.routes()).find((route) => route.id === routeId)!;
     });
   }
   async requests(user: User) {
@@ -187,7 +216,7 @@ export class TransportService {
       JOIN routes r ON r.id = q."routeId" JOIN stops t ON t.id = q."stopId" LEFT JOIN stops d ON d.id = q."dropoffStopId" JOIN vehicles v ON v.id = r."vehicleId"
       WHERE ($1::text = 'ADMIN' OR q."guardianId" = $2) ORDER BY q."createdAt" DESC`,
       user.role,
-      user.id
+      user.id,
     );
   }
   async subscriptions(user: User) {
@@ -196,13 +225,21 @@ export class TransportService {
       FROM subscriptions s JOIN routes r ON r.id = s."routeId" JOIN stops t ON t.id = s."stopId" LEFT JOIN stops d ON d.id = s."dropoffStopId" JOIN vehicles v ON v.id = r."vehicleId"
       WHERE ($1::text = 'ADMIN' OR s."guardianId" = $2) ORDER BY s."startedAt" DESC`,
       user.role,
-      user.id
+      user.id,
     );
   }
   async request(user: User, input: CreateServiceRequestDto) {
     return this.transaction(async () => {
-      const monthlyAmount = await journeyFare(this.db, input.routeId, input.stopId, input.dropoffStopId);
-      if (!input.dropoffStopId && await this.db.get('SELECT 1 FROM route_fares WHERE "routeId"=$1 LIMIT 1', input.routeId))
+      const monthlyAmount = await journeyFare(
+        this.db,
+        input.routeId,
+        input.stopId,
+        input.dropoffStopId,
+      );
+      if (
+        !input.dropoffStopId &&
+        (await this.db.get('SELECT 1 FROM route_fares WHERE "routeId"=$1 LIMIT 1', input.routeId))
+      )
         throw new BadRequestException('Select a destination to use the configured journey fare');
       const profile = await resolveStudent(this.db, user.id, input.studentName, input.studentId);
       const { shiftId, operatingDays } = await resolveSchedule(this.db, input);
@@ -210,7 +247,12 @@ export class TransportService {
       const warnings = await overlapWarnings(this.db, profile.id, shiftId, operatingDays);
       input = { ...input, studentName: profile.studentName };
       if (input.studentId) for (const field of sharedProfileFields) input[field] = profile[field];
-      else await this.db.run(`UPDATE student_profiles SET ${sharedProfileFields.map((field,i)=>`"${field}"=$${i+1}`).join(',')} WHERE id=$6`, ...sharedProfileFields.map(field=>input[field]??profile[field]), profile.id);
+      else
+        await this.db.run(
+          `UPDATE student_profiles SET ${sharedProfileFields.map((field, i) => `"${field}"=$${i + 1}`).join(',')} WHERE id=$6`,
+          ...sharedProfileFields.map((field) => input[field] ?? profile[field]),
+          profile.id,
+        );
       const id = randomUUID();
       await this.db.run(
         `INSERT INTO service_requests (id,"guardianId","studentName","routeId","stopId",status,"createdAt","dropoffStopId","monthlyAmount","studentId","shiftId","operatingDays") VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11)`,
@@ -221,17 +263,37 @@ export class TransportService {
         input.stopId,
         new Date().toISOString(),
         input.dropoffStopId ?? null,
-        monthlyAmount, profile.id, shiftId, operatingDays
+        monthlyAmount,
+        profile.id,
+        shiftId,
+        operatingDays,
       );
-      await this.db.run(`UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7 WHERE id=$8`,
-        input.className??'',input.roll??'',input.studentCode??'',input.photoUrl??'',input.pickupAddress??'',input.dropAddress??'',input.emergencyContact??'',id);
+      await this.db.run(
+        `UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7 WHERE id=$8`,
+        input.className ?? '',
+        input.roll ?? '',
+        input.studentCode ?? '',
+        input.photoUrl ?? '',
+        input.pickupAddress ?? '',
+        input.dropAddress ?? '',
+        input.emergencyContact ?? '',
+        id,
+      );
       await this.notifications.admins(
         'New service request',
         `${user.name} requested transport for ${input.studentName}.`,
-        id
+        id,
       );
       await this.notifications.audit(user.id, 'SERVICE_REQUESTED', id);
-      return { id, status: 'PENDING', monthlyAmount, studentId: profile.id, shiftId, operatingDays, warnings };
+      return {
+        id,
+        status: 'PENDING',
+        monthlyAmount,
+        studentId: profile.id,
+        shiftId,
+        operatingDays,
+        warnings,
+      };
     });
   }
   async reviewRequest(actor: User, id: string, input: DecisionDto) {
@@ -239,14 +301,19 @@ export class TransportService {
     return this.transaction(async () => {
       const request = await this.db.get<ServiceRequest>(
         `SELECT * FROM service_requests WHERE id = $1`,
-        id
+        id,
       );
       if (!request) throw new NotFoundException('Request not found');
       if (request.status !== 'PENDING')
         throw new ConflictException('This request has already been reviewed');
       const now = new Date().toISOString();
       if (input.decision === 'APPROVED') {
-        const monthlyAmount = await journeyFare(this.db, request.routeId, request.stopId, request.dropoffStopId);
+        const monthlyAmount = await journeyFare(
+          this.db,
+          request.routeId,
+          request.stopId,
+          request.dropoffStopId,
+        );
         await assertAvailableShift(this.db, request.studentId!, request.shiftId!, id);
         await resolveSchedule(this.db, request);
         await this.db.run(
@@ -260,13 +327,17 @@ export class TransportService {
           request.stopId,
           monthlyAmount,
           now,
-          request.dropoffStopId ?? null, request.studentId, request.shiftId, request.operatingDays
+          request.dropoffStopId ?? null,
+          request.studentId,
+          request.shiftId,
+          request.operatingDays,
         );
-        await this.db.run("UPDATE service_requests SET \"monthlyAmount\"=$1,status='APPROVED' WHERE id=$2", monthlyAmount, id);
         await this.db.run(
-          `UPDATE users SET verified = 1 WHERE id = $1`,
-          request.guardianId
+          'UPDATE service_requests SET "monthlyAmount"=$1,status=\'APPROVED\' WHERE id=$2',
+          monthlyAmount,
+          id,
         );
+        await this.db.run(`UPDATE users SET verified = 1 WHERE id = $1`, request.guardianId);
       }
       await this.db.run(
         `UPDATE service_requests SET status = $1,note = $2,"reviewedBy" = $3,"reviewedAt" = $4 WHERE id = $5`,
@@ -274,35 +345,23 @@ export class TransportService {
         input.note ?? '',
         actor.id,
         now,
-        id
+        id,
       );
       await this.notifications.create(
         request.guardianId,
-        input.decision === 'APPROVED'
-          ? 'Transport service approved'
-          : 'Service request rejected',
+        input.decision === 'APPROVED' ? 'Transport service approved' : 'Service request rejected',
         input.decision === 'APPROVED'
           ? 'Your service is active. You can now track your assigned vehicle.'
           : input.note!,
-        id
-      );
-      await this.notifications.audit(
-        actor.id,
-        `SERVICE_${input.decision}`,
         id,
-        input.note
       );
+      await this.notifications.audit(actor.id, `SERVICE_${input.decision}`, id, input.note);
       return { id, status: input.decision };
     });
   }
   async callNote(actor: User, id: string, note: string) {
     return this.transaction(async () => {
-      if (
-        !(await this.db.get(
-          `SELECT id FROM service_requests WHERE id = $1`,
-          id
-        ))
-      )
+      if (!(await this.db.get(`SELECT id FROM service_requests WHERE id = $1`, id)))
         throw new NotFoundException('Request not found');
       await this.notifications.audit(actor.id, 'GUARDIAN_CALLED', id, note);
       return { saved: true };
@@ -314,7 +373,7 @@ export class TransportService {
       JOIN users u ON u.id = c."guardianId" JOIN subscriptions s ON s.id = c."subscriptionId"
       WHERE ($1::text = 'ADMIN' OR c."guardianId" = $2) ORDER BY c."createdAt" DESC`,
       user.role,
-      user.id
+      user.id,
     );
   }
   async complain(user: User, input: ComplaintDto) {
@@ -328,12 +387,12 @@ export class TransportService {
         input.subscriptionId,
         input.category,
         input.description,
-        new Date().toISOString()
+        new Date().toISOString(),
       );
       await this.notifications.admins(
         'New complaint',
         `${user.name} submitted a transport complaint.`,
-        id
+        id,
       );
       await this.notifications.audit(user.id, 'COMPLAINT_SUBMITTED', id);
       return { id, status: 'OPEN' };
@@ -343,7 +402,7 @@ export class TransportService {
     return this.transaction(async () => {
       const complaint = await this.db.get<{ guardianId: string }>(
         `SELECT "guardianId" FROM complaints WHERE id = $1`,
-        id
+        id,
       );
       if (!complaint) throw new NotFoundException('Complaint not found');
       if (input.status === 'RESOLVED' && !input.note?.trim())
@@ -353,20 +412,15 @@ export class TransportService {
         input.status,
         input.note ?? '',
         new Date().toISOString(),
-        id
+        id,
       );
       await this.notifications.create(
         complaint.guardianId,
         'Complaint updated',
         input.note || 'Your complaint is being reviewed.',
-        id
-      );
-      await this.notifications.audit(
-        actor.id,
-        `COMPLAINT_${input.status}`,
         id,
-        input.note
       );
+      await this.notifications.audit(actor.id, `COMPLAINT_${input.status}`, id, input.note);
       return { id, status: input.status };
     });
   }
@@ -376,7 +430,7 @@ export class TransportService {
       JOIN users u ON u.id = q."guardianId" JOIN subscriptions s ON s.id = q."subscriptionId"
       WHERE ($1::text = 'ADMIN' OR q."guardianId" = $2) ORDER BY q."createdAt" DESC`,
       user.role,
-      user.id
+      user.id,
     );
   }
   async stop(user: User, input: StopRequestDto) {
@@ -385,7 +439,7 @@ export class TransportService {
       if (
         await this.db.get(
           `SELECT id FROM stop_requests WHERE "subscriptionId" = $1 AND status = 'PENDING'`,
-          input.subscriptionId
+          input.subscriptionId,
         )
       )
         throw new ConflictException('A stop request is already pending');
@@ -396,12 +450,12 @@ export class TransportService {
         user.id,
         input.subscriptionId,
         input.reason,
-        new Date().toISOString()
+        new Date().toISOString(),
       );
       await this.notifications.admins(
         'Stop service request',
         `${user.name} requested to stop a transport service.`,
-        id
+        id,
       );
       await this.notifications.audit(user.id, 'STOP_REQUESTED', id);
       return { id, status: 'PENDING' };
@@ -417,39 +471,30 @@ export class TransportService {
       }>(`SELECT * FROM stop_requests WHERE id = $1`, id);
       if (!request) throw new NotFoundException('Stop request not found');
       if (request.status !== 'PENDING')
-        throw new ConflictException(
-          'This stop request has already been reviewed'
-        );
+        throw new ConflictException('This stop request has already been reviewed');
       const now = new Date().toISOString();
       if (input.decision === 'APPROVED')
         await this.db.run(
           `UPDATE subscriptions SET status = 'STOPPED',"stoppedAt" = $1 WHERE id = $2`,
           now,
-          request.subscriptionId
+          request.subscriptionId,
         );
       await this.db.run(
         `UPDATE stop_requests SET status = $1,note = $2,"reviewedAt" = $3 WHERE id = $4`,
         input.decision,
         input.note ?? '',
         now,
-        id
+        id,
       );
       await this.notifications.create(
         request.guardianId,
-        input.decision === 'APPROVED'
-          ? 'Transport service stopped'
-          : 'Stop request rejected',
+        input.decision === 'APPROVED' ? 'Transport service stopped' : 'Stop request rejected',
         input.decision === 'APPROVED'
           ? 'Your service has stopped. Previous bills remain in your payment history.'
           : input.note!,
-        id
-      );
-      await this.notifications.audit(
-        actor.id,
-        `STOP_${input.decision}`,
         id,
-        input.note
       );
+      await this.notifications.audit(actor.id, `STOP_${input.decision}`, id, input.note);
       return { id, status: input.decision };
     });
   }
@@ -457,38 +502,27 @@ export class TransportService {
     try {
       return await this.db.transaction(work);
     } catch (error) {
-      if (
-        error &&
-        typeof error === 'object' &&
-        'code' in error &&
-        error.code === '23505'
-      ) {
-        const constraint =
-          'constraint' in error ? String(error.constraint) : '';
+      if (error && typeof error === 'object' && 'code' in error && error.code === '23505') {
+        const constraint = 'constraint' in error ? String(error.constraint) : '';
         const conflicts: Record<string, string> = {
-          student_profiles_guardianId_studentName_key: 'This student already exists. Select the existing student to add a different shift',
+          student_profiles_guardianId_studentName_key:
+            'This student already exists. Select the existing student to add a different shift',
           pending_service: 'This student already has a pending request in this shift',
-          active_student:
-            'This student already has an active transport service in this shift',
+          active_student: 'This student already has an active transport service in this shift',
           pending_stop: 'A stop request is already pending',
         };
-        if (conflicts[constraint])
-          throw new ConflictException(conflicts[constraint]);
+        if (conflicts[constraint]) throw new ConflictException(conflicts[constraint]);
       }
       throw error;
     }
   }
-  private async assertActiveSubscription(
-    user: User,
-    id: string
-  ): Promise<void> {
+  private async assertActiveSubscription(user: User, id: string): Promise<void> {
     const subscription = await this.db.get<Subscription>(
       `SELECT * FROM subscriptions WHERE id = $1 AND "guardianId" = $2 AND status = 'ACTIVE'`,
       id,
-      user.id
+      user.id,
     );
-    if (!subscription)
-      throw new ForbiddenException('An active, approved service is required');
+    if (!subscription) throw new ForbiddenException('An active, approved service is required');
   }
   private validateDecision(input: DecisionDto): void {
     if (input.decision === 'REJECTED' && !input.note?.trim())

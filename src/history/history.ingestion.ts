@@ -12,31 +12,25 @@ export class HistoryIngestion {
 
   constructor(
     private readonly db: DatabaseService,
-    private readonly repository: HistoryRepository
+    private readonly repository: HistoryRepository,
   ) {
     this.offset = Number(process.env.GPS_TIMEZONE_OFFSET_MINUTES ?? 0);
     if (!Number.isInteger(this.offset) || Math.abs(this.offset) > 840)
-      throw new Error(
-        'GPS_TIMEZONE_OFFSET_MINUTES must be an integer between -840 and 840'
-      );
+      throw new Error('GPS_TIMEZONE_OFFSET_MINUTES must be an integer between -840 and 840');
   }
 
   /** Writes on the caller's shared PostgreSQL transaction; never acknowledges an in-memory queue. */
-  async record(
-    report: PositionReport,
-    receivedAt: string
-  ): Promise<string | null> {
+  async record(report: PositionReport, receivedAt: string): Promise<string | null> {
     const gpsTime = parseGpsTime(report.gpsTime, this.offset);
-    const usableTime =
-      gpsTime && Date.parse(gpsTime) <= Date.parse(receivedAt) + 5 * 60_000;
+    const usableTime = gpsTime && Date.parse(gpsTime) <= Date.parse(receivedAt) + 5 * 60_000;
     const quality = !usableTime
       ? 'invalid-time'
       : report.gpsFixed === false
-      ? 'invalid-fix'
-      : 'valid';
+        ? 'invalid-fix'
+        : 'valid';
     const vehicle = await this.db.get<{ id: string }>(
       'SELECT id FROM vehicles WHERE imei=$1',
-      report.imei
+      report.imei,
     );
     const key = createHash('sha256')
       .update(
@@ -49,7 +43,7 @@ export class HistoryIngestion {
           report.course,
           report.protocol ?? null,
           report.status ?? null,
-        ])
+        ]),
       )
       .digest('hex');
     const event: HistoryEvent = {
@@ -69,10 +63,5 @@ export class HistoryIngestion {
     };
     await this.repository.insert([event]);
     return quality === 'valid' ? gpsTime : null;
-  }
-
-  // Completeness describes committed records, not uninterrupted device coverage.
-  freshness(_imei: string, _from: string, _to: string) {
-    return { pendingPoints: 0, oldestPendingAt: null, complete: true };
   }
 }

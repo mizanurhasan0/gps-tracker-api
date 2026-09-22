@@ -7,8 +7,6 @@ import { TransportController } from './transport.controller';
 import { TransportService } from './transport.service';
 import { ManagementController } from '../management/management.controller';
 import { ManagementService } from '../management/management.service';
-import { TELEGRAM_DELIVERY } from '../notifications/telegram-delivery.port';
-import { TelegramDeliveryAdapter } from '../notifications/telegram-delivery.adapter';
 import { TelegramModule } from '../telegram/telegram.module';
 @Module({
   imports: [TelegramModule],
@@ -18,14 +16,7 @@ import { TelegramModule } from '../telegram/telegram.module';
     NotificationsController,
     ManagementController,
   ],
-  providers: [
-    TransportService,
-    PaymentsService,
-    NotificationsService,
-    ManagementService,
-    TelegramDeliveryAdapter,
-    { provide: TELEGRAM_DELIVERY, useExisting: TelegramDeliveryAdapter },
-  ],
+  providers: [TransportService, PaymentsService, NotificationsService, ManagementService],
   exports: [NotificationsService],
 })
 export class TransportModule {}
