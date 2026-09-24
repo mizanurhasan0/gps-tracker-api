@@ -10,6 +10,9 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,banners,requests,settings,schedules}`; guardians receive published image banners, while admins also receive hidden banners for management |
 | POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
 | PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId, legacy monthlyAmount, status ACTIVE/STOPPED |
+| PATCH | `/admin/students/:id/archive` | Archives the canonical student resolved from an enrollment ID and stops all active shifts; returns `{studentId,archivedAt,affectedSubscriptions}` |
+| PATCH | `/admin/students/:id/restore` | Restores the canonical profile without reactivating stopped shifts; returns `{studentId,archivedAt:null,affectedSubscriptions:0}` |
+| GET | `/admin/students/archived` | Archived students as the existing enrollment-shaped student rows, including `archivedAt` and `archivedBy` |
 | PUT | `/admin/routes/:id/fares` | Atomic replacement `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
 | POST / PATCH | `/admin/drivers`, `/admin/drivers/:id` | Name, phone, NID, address, joiningDate, monthlySalary, status, optional vehicleId |
 | PUT | `/admin/attendance` | `{entries:[{studentId or driverId,date,status,note?}]}`; atomic upsert, max 500 |
@@ -48,6 +51,12 @@ ownership. Multiple students can belong to the same guardian, whose dashboard
 continues to show only their own linked students.
 Restarting a stopped service requires a new enrollment. A stopped subscription
 cannot be changed back to active, which preserves its closed billing period.
+Archiving applies to the canonical student across every shift. It is refused while
+the student has a pending service request, stops every active subscription, hides
+the profile from normal admin and guardian overviews, and preserves attendance,
+bills, payments, requests and audit history. Restore makes the profile available
+again but deliberately leaves its former subscriptions stopped. Archived profiles
+cannot be edited, reused by ID, or silently reused by name until restored.
 
 `photoUrl` allows an empty value, HTTPS URI, or JPEG/PNG base64 data URI up to
 450,000 characters. The server accepts JSON bodies up to 768 KiB. The mobile app

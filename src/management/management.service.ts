@@ -137,18 +137,85 @@ export class ManagementService {
     };
   }
 
-  students(user: User, id?: string) {
+  students(user: User, id?: string, archived = false) {
     return this.db.all<Row>(
-      `SELECT p.*,c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",
+      `SELECT p.*,c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",c."archivedAt",c."archivedBy",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",
       u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverName" ELSE NULL END "driverName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverPhone" ELSE NULL END "driverPhone"
       FROM students p JOIN subscriptions s ON s.id=p.id JOIN student_profiles c ON c.id=s."studentId" JOIN users u ON u.id=s."guardianId" JOIN routes r ON r.id=s."routeId"
-      JOIN stops t ON t.id=s."stopId" LEFT JOIN stops d ON d.id=s."dropoffStopId" JOIN vehicles v ON v.id=r."vehicleId" WHERE ($1::text='ADMIN' OR s."guardianId"=$2) AND ($3::text IS NULL OR s.id=$3) ORDER BY s."studentName",s.id`,
+      JOIN stops t ON t.id=s."stopId" LEFT JOIN stops d ON d.id=s."dropoffStopId" JOIN vehicles v ON v.id=r."vehicleId" WHERE ($1::text='ADMIN' OR s."guardianId"=$2) AND ($3::text IS NULL OR s.id=$3) AND (($4::boolean AND c."archivedAt" IS NOT NULL) OR (NOT $4::boolean AND c."archivedAt" IS NULL)) ORDER BY s."studentName",s.id`,
       user.role,
       user.id,
       id ?? null,
+      archived,
     );
+  }
+
+  archivedStudents(actor: User) {
+    return this.students(actor, undefined, true);
+  }
+
+  async archiveStudent(actor: User, enrollmentId: string) {
+    return this.write(async () => {
+      const enrollment = await this.require('subscriptions', enrollmentId);
+      const profile = await this.db.get<Row>(
+        'SELECT * FROM student_profiles WHERE id=$1 FOR UPDATE',
+        enrollment.studentId,
+      );
+      if (!profile) throw new NotFoundException('student profiles record not found');
+      if (profile.archivedAt)
+        return { studentId: profile.id, archivedAt: profile.archivedAt, affectedSubscriptions: 0 };
+      if (
+        await this.db.get(
+          `SELECT id FROM service_requests WHERE "studentId"=$1 AND status='PENDING' LIMIT 1`,
+          profile.id,
+        )
+      )
+        throw new ConflictException('Review pending service requests before archiving this student');
+      const timestamp = now();
+      await this.db.run(
+        'UPDATE student_profiles SET "archivedAt"=$1,"archivedBy"=$2 WHERE id=$3',
+        timestamp,
+        actor.id,
+        profile.id,
+      );
+      const stopped = await this.db.run(
+        `UPDATE subscriptions SET status='STOPPED',"stoppedAt"=$1 WHERE "studentId"=$2 AND status='ACTIVE'`,
+        timestamp,
+        profile.id,
+      );
+      await this.notifications.audit(
+        actor.id,
+        'STUDENT_ARCHIVED',
+        profile.id,
+        `${stopped.rowCount} active subscription(s) stopped`,
+      );
+      return {
+        studentId: profile.id,
+        archivedAt: timestamp,
+        affectedSubscriptions: stopped.rowCount,
+      };
+    });
+  }
+
+  async restoreStudent(actor: User, enrollmentId: string) {
+    return this.write(async () => {
+      const enrollment = await this.require('subscriptions', enrollmentId);
+      const profile = await this.db.get<Row>(
+        'SELECT * FROM student_profiles WHERE id=$1 FOR UPDATE',
+        enrollment.studentId,
+      );
+      if (!profile) throw new NotFoundException('student profiles record not found');
+      if (!profile.archivedAt)
+        return { studentId: profile.id, archivedAt: null, affectedSubscriptions: 0 };
+      await this.db.run(
+        'UPDATE student_profiles SET "archivedAt"=NULL,"archivedBy"=NULL WHERE id=$1',
+        profile.id,
+      );
+      await this.notifications.audit(actor.id, 'STUDENT_RESTORED', profile.id);
+      return { studentId: profile.id, archivedAt: null, affectedSubscriptions: 0 };
+    });
   }
 
   async saveStudent(actor: User, input: CreateStudentDto | UpdateStudentDto, id?: string) {
@@ -156,6 +223,14 @@ export class ManagementService {
     id ??= randomUUID();
     return this.write(async () => {
       const existing = existingId ? await this.require('subscriptions', existingId) : undefined;
+      if (existing) {
+        const profile = await this.db.get<{ archivedAt: Date | null }>(
+          'SELECT "archivedAt" FROM student_profiles WHERE id=$1',
+          existing.studentId,
+        );
+        if (profile?.archivedAt)
+          throw new ConflictException('Restore this student before updating the enrollment');
+      }
       const guardianPhone = input.guardianPhone?.replace(/^(?:\+?88)/, '');
       let guardian = guardianPhone
         ? await this.db.get<{ id: string; role: string }>(
@@ -882,7 +957,8 @@ export class ManagementService {
         month,
       );
       const students = await this.db.get<Row>(
-        `SELECT count(DISTINCT \"studentId\")::int total,count(DISTINCT \"studentId\") FILTER(WHERE status='ACTIVE')::int active FROM subscriptions`,
+        `SELECT count(DISTINCT s."studentId")::int total,count(DISTINCT s."studentId") FILTER(WHERE s.status='ACTIVE')::int active
+         FROM subscriptions s JOIN student_profiles p ON p.id=s."studentId" WHERE p."archivedAt" IS NULL`,
       );
       const drivers = await this.db.get<{ count: number }>(
         'SELECT count(*)::int count FROM drivers',

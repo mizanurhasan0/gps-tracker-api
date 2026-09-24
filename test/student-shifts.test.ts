@@ -150,4 +150,42 @@ test('student shifts, weekly travel and cross-table concurrency HTTP integration
     await request(`/admin/requests/${replacement.id}/decision`, admin.token, { decision: 'APPROVED' }, 'PATCH');
     assert.equal((await db.get('SELECT count(*)::int count FROM bills WHERE "subscriptionId"=$1', day.id)).count, 1);
   });
+  await t.test('archive hides a canonical student, stops every shift, preserves history, and restore does not reactivate service', async () => {
+    let pending = await db.get(`SELECT id FROM service_requests WHERE "studentId"=$1 AND status='PENDING' LIMIT 1`, morning.studentId);
+    if (!pending) {
+      const evening = await db.get(`SELECT id FROM subscriptions WHERE "studentId"=$1 AND "shiftId"='EVENING' AND status='ACTIVE'`, morning.studentId);
+      assert.ok(evening);
+      await request(`/admin/students/${evening.id}`, admin.token, { status: 'STOPPED' }, 'PATCH');
+      pending = await apply({ studentId: morning.studentId, shiftId: 'EVENING' });
+    }
+    await request(`/admin/students/${morning.id}/archive`, admin.token, undefined, 'PATCH', 409);
+    await request(`/admin/requests/${pending.id}/decision`, admin.token, { decision: 'REJECTED', note: 'Archive test' }, 'PATCH');
+    await request(`/admin/students/${morning.id}/archive`, guardian.token, undefined, 'PATCH', 403);
+    const attendanceBefore = (await db.get('SELECT count(*)::int count FROM attendance WHERE "studentId"=$1', morning.id)).count;
+    const billsBefore = (await db.get(`SELECT count(*)::int count FROM bills b JOIN subscriptions s ON s.id=b."subscriptionId" WHERE s."studentId"=$1`, morning.studentId)).count;
+    const archived = await request(`/admin/students/${day.id}/archive`, admin.token, undefined, 'PATCH');
+    assert.equal(archived.studentId, morning.studentId);
+    assert.equal(archived.affectedSubscriptions, 2);
+    assert.ok(archived.archivedAt);
+    assert.equal((await request('/management/overview', admin.token)).students.some((student: Row) => student.studentId === morning.studentId), false);
+    assert.equal((await request('/management/overview', guardian.token)).students.some((student: Row) => student.studentId === morning.studentId), false);
+    const archivedRows = await request('/admin/students/archived', admin.token);
+    assert.ok(archivedRows.length >= 3);
+    assert.ok(archivedRows.filter((student: Row) => student.studentId === morning.studentId).every((student: Row) => student.archivedAt));
+    await request('/admin/students/archived', guardian.token, undefined, 'GET', 403);
+    assert.ok((await db.all('SELECT status FROM subscriptions WHERE "studentId"=$1', morning.studentId)).every((service: Row) => service.status === 'STOPPED'));
+    assert.equal((await db.get('SELECT count(*)::int count FROM attendance WHERE "studentId"=$1', morning.id)).count, attendanceBefore);
+    assert.equal((await db.get(`SELECT count(*)::int count FROM bills b JOIN subscriptions s ON s.id=b."subscriptionId" WHERE s."studentId"=$1`, morning.studentId)).count, billsBefore);
+    await request(`/admin/students/${morning.id}`, admin.token, { roll: '99' }, 'PATCH', 409);
+    await enroll({ studentId: morning.studentId, shiftId: 'EVENING' }, 409);
+    const repeated = await request(`/admin/students/${morning.id}/archive`, admin.token, undefined, 'PATCH');
+    assert.equal(repeated.affectedSubscriptions, 0);
+    const restored = await request(`/admin/students/${day.id}/restore`, admin.token, undefined, 'PATCH');
+    assert.equal(restored.studentId, morning.studentId);
+    assert.equal(restored.archivedAt, null);
+    assert.ok((await db.all('SELECT status FROM subscriptions WHERE "studentId"=$1', morning.studentId)).every((service: Row) => service.status === 'STOPPED'));
+    assert.ok((await request('/management/overview', guardian.token)).students.some((student: Row) => student.studentId === morning.studentId));
+    assert.equal((await request('/admin/students/archived', admin.token)).some((student: Row) => student.studentId === morning.studentId), false);
+    assert.equal((await request(`/admin/students/${day.id}/restore`, admin.token, undefined, 'PATCH')).affectedSubscriptions, 0);
+  });
 });

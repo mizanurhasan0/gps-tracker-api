@@ -52,6 +52,21 @@ export class ManagementController {
   ) {
     return this.service.saveStudent(req.user, input, id);
   }
+  @Roles('ADMIN') @Get('admin/students/archived') archivedStudents(@Req() req: AuthRequest) {
+    return this.service.archivedStudents(req.user);
+  }
+  @Roles('ADMIN') @Patch('admin/students/:id/archive') archiveStudent(
+    @Req() req: AuthRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.service.archiveStudent(req.user, id);
+  }
+  @Roles('ADMIN') @Patch('admin/students/:id/restore') restoreStudent(
+    @Req() req: AuthRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.service.restoreStudent(req.user, id);
+  }
   @Roles('ADMIN') @Post('admin/drivers') driver(
     @Req() req: AuthRequest,
     @Body() input: CreateDriverDto,

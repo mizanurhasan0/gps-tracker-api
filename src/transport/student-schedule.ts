@@ -15,7 +15,12 @@ export const sharedProfileFields = [
   'photoUrl',
   'emergencyContact',
 ] as const;
-export type StudentProfile = { id: string; guardianId: string; studentName: string } & Record<
+export type StudentProfile = {
+  id: string;
+  guardianId: string;
+  studentName: string;
+  archivedAt: Date | null;
+} & Record<
   (typeof sharedProfileFields)[number],
   string
 >;
@@ -71,6 +76,8 @@ export async function resolveStudent(
       guardianId,
     );
     if (!profile) throw new ForbiddenException('This student does not belong to this guardian');
+    if (profile.archivedAt)
+      throw new ConflictException('This student is archived. Restore the student before enrolling');
     return profile;
   }
   // A name is only a duplicate warning. Reuse an existing student through their explicit ID.
@@ -80,6 +87,8 @@ export async function resolveStudent(
     name,
   );
   if (match) {
+    if (match.archivedAt)
+      throw new ConflictException('This student is archived. Restore the student before enrolling');
     // Backward-compatible reapplication after all of the student's services ended.
     if (
       await db.get(

@@ -8,6 +8,7 @@ import { bannerRoutesSchema } from './banner-routes.schema';
 import { telegramSchema } from './telegram.schema';
 import { paymentsSchema } from './payments.schema';
 import { adminRecoverySchema } from './admin-recovery.schema';
+import { studentArchiveSchema } from './student-archive.schema';
 
 /** Append migrations; existing versions must retain their upgrade semantics. */
 export const migrations = [
@@ -21,4 +22,5 @@ export const migrations = [
   [8, telegramSchema],
   [9, paymentsSchema],
   [10, adminRecoverySchema],
+  [11, studentArchiveSchema],
 ] as const;

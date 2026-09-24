@@ -52,7 +52,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   let vehicle:Row,route:Row,student:Row,secondStudent:Row,driver:Row,maintenance:Row;
 
   await t.test('upgrades real version 1 data and backfills student and driver IDs',async()=>{
-    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7},{version:8},{version:9},{version:10}]);
+    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7},{version:8},{version:9},{version:10},{version:11}]);
     const migratedService=await db.get('SELECT * FROM subscriptions WHERE id=$1',legacy.student);
     assert.equal(migratedService.shiftId,'MORNING');
     assert.deepEqual(migratedService.operatingDays,[0,1,2,3,4,5,6]);
