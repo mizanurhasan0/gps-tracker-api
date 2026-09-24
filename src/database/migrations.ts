@@ -7,6 +7,7 @@ import { bannerLinksSchema } from './banner-links.schema';
 import { bannerRoutesSchema } from './banner-routes.schema';
 import { telegramSchema } from './telegram.schema';
 import { paymentsSchema } from './payments.schema';
+import { adminRecoverySchema } from './admin-recovery.schema';
 
 /** Append migrations; existing versions must retain their upgrade semantics. */
 export const migrations = [
@@ -19,4 +20,5 @@ export const migrations = [
   [7, bannerRoutesSchema],
   [8, telegramSchema],
   [9, paymentsSchema],
+  [10, adminRecoverySchema],
 ] as const;

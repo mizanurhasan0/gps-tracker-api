@@ -107,7 +107,17 @@ export class AuthService implements OnModuleInit {
     const actual = (await scrypt(input.password, salt, 64)) as Buffer;
     if (!account || !timingSafeEqual(Buffer.from(expected, 'hex'), actual))
       throw new UnauthorizedException('Phone number or password is incorrect');
-    return this.issueSession(account.id);
+    return this.db.transaction(async () => {
+      // Serialize issuance with password recovery: an old-password login that
+      // was already hashing must not create a session after recovery commits.
+      const current = await this.db.get<{ passwordHash: string }>(
+        'SELECT "passwordHash" FROM users WHERE id=$1 FOR SHARE',
+        account.id,
+      );
+      if (current?.passwordHash !== account.passwordHash)
+        throw new UnauthorizedException('Phone number or password is incorrect');
+      return this.issueSession(account.id);
+    });
   }
 
   async authenticate(token: string | undefined): Promise<User> {

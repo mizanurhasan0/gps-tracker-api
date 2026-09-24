@@ -14,6 +14,7 @@ const unitFiles = [
   'locations.service',
   'profile',
   'realtime',
+  'recovery',
   'telegram-delivery',
   'telegram-polling',
   'telegram-security',

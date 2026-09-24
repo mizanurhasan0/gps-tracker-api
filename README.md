@@ -36,7 +36,9 @@ npm run start:dev
 precedence. The admin is bootstrapped only when no admin exists. Guardians can
 self-register using a Bangladesh phone number and a password (8–128 characters).
 Changing ADMIN_PASSWORD later does not reset an existing account's password.
-No default admin credentials are shipped. Password reset/OTP is not implemented.
+No default admin credentials are shipped. Optional owner-bound admin email recovery
+is documented in [admin recovery](docs/ADMIN_RECOVERY.md). It is disabled until
+Gmail SMTP and a recovery secret are configured; guardian password reset is not implemented.
 
 The mobile app's admin **Setup** screen configures payment methods, receiving accounts and QR images,
 vehicles and routes. Admin **Bills** generates the chosen month's bills. A

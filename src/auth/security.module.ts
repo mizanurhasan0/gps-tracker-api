@@ -5,8 +5,10 @@ import { AccessService } from './access.service';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
+import { RecoveryModule } from './recovery/recovery.module';
 @Global()
 @Module({
+  imports: [RecoveryModule],
   controllers: [AuthController],
   providers: [
     DatabaseService,

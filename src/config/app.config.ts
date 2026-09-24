@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { readRecoveryConfig } from '../auth/recovery/recovery.config';
 
 if (existsSync('.env')) process.loadEnvFile('.env');
 
@@ -122,6 +123,7 @@ export const appConfig = {
     url: readString(process.env.DATABASE_URL, ''),
   },
   telegram: readTelegramConfig(),
+  recovery: readRecoveryConfig(),
 } as const;
 
 export type AppConfig = typeof appConfig;
