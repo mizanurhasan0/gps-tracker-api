@@ -8,6 +8,8 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { GeofenceCoordinator } from './geofence/geofence.coordinator';
+import { BackupModule } from './backup/backup.module';
+import { DataTransferModule } from './data-transfer/data-transfer.module';
 
 @Module({
   imports: [
@@ -18,6 +20,8 @@ import { GeofenceCoordinator } from './geofence/geofence.coordinator';
     RealtimeModule,
     Gt06Module,
     TelegramModule,
+    DataTransferModule,
+    BackupModule,
   ],
   controllers: [HealthController],
   providers: [GeofenceCoordinator],

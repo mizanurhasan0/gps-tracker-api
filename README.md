@@ -3,6 +3,8 @@
 All persistent application data uses one PostgreSQL database: accounts, sessions,
 vehicles, transport, payments, latest GPS positions and admin-only route history.
 See [history API](docs/HISTORY_API.md) and [Docker setup and migration](docs/HISTORY_DEPLOYMENT.md).
+Admin CSV/XLSX transfer and encrypted Google Drive backups are documented in
+[data transfer and backup](docs/DATA_TRANSFER_AND_BACKUP.md).
 There is no runtime SQLite, JSON file store or local history queue.
 
 NestJS server for GT06 protocol GPS trackers (CY03A, Concox and clones). It accepts

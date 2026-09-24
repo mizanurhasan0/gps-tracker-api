@@ -18,7 +18,12 @@ const unitFiles = [
   'telegram-delivery',
   'telegram-polling',
   'telegram-security',
-].map((name) => join('test', `${name}.test.ts`));
+].map((name) => join('test', `${name}.test.ts`)).concat([
+  join('test', 'backup.test.ts'),
+  join('test', 'backup.restore.test.cjs'),
+  join('test', 'data-transfer.codec.test.ts'),
+  join('test', 'data-transfer.service.test.ts'),
+]);
 if (!unitOnly && (!url || !/^postgres(?:ql)?:\/\//.test(url))) {
   console.error(
     'Full tests require TEST_DATABASE_URL pointing to a disposable PostgreSQL database. Use npm run test:unit for database-free checks.',
