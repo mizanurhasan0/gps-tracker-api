@@ -1,4 +1,4 @@
-import { dhakaDate } from '../common/dhaka-time';
+import { dhakaDate, dhakaMonth } from '../common/dhaka-time';
 import {
   BadRequestException,
   ConflictException,
@@ -35,6 +35,7 @@ import {
   CreateStudentDto,
   ScheduleDto,
   SettingsDto,
+  StopStudentServiceDto,
   UpdateBannerDto,
   UpdateDriverDto,
   UpdateMaintenanceDto,
@@ -139,7 +140,7 @@ export class ManagementService {
 
   students(user: User, id?: string, archived = false) {
     return this.db.all<Row>(
-      `SELECT p.*,c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",c."archivedAt",c."archivedBy",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",
+      `SELECT p.*,c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",c."archivedAt",c."archivedBy",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",s."stoppedAt",s."stoppedOn",s."stopReason",s."finalMonthlyFee",
       u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverName" ELSE NULL END "driverName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverPhone" ELSE NULL END "driverPhone"
@@ -180,8 +181,63 @@ export class ManagementService {
         actor.id,
         profile.id,
       );
-      const stopped = await this.db.run(
-        `UPDATE subscriptions SET status='STOPPED',"stoppedAt"=$1 WHERE "studentId"=$2 AND status='ACTIVE'`,
+      const activeServices = await this.db.all<Row>(
+        `SELECT * FROM subscriptions WHERE "studentId"=$1 AND status='ACTIVE' FOR UPDATE`,
+        profile.id,
+      );
+      for (const service of activeServices) {
+        const month = dhakaMonth();
+        let bill = await this.db.get<Row>(
+          'SELECT * FROM bills WHERE "subscriptionId"=$1 AND month=$2 FOR UPDATE',
+          service.id,
+          month,
+        );
+        const previousBillAmount = bill?.amount ?? null;
+        let billAction = 'UNCHANGED';
+        if (!bill) {
+          const billId = randomUUID();
+          await this.db.run(
+            `INSERT INTO bills(id,"guardianId","subscriptionId",month,amount,status,"createdAt")
+             VALUES($1,$2,$3,$4,$5,'UNPAID',$6)`,
+            billId,
+            service.guardianId,
+            service.id,
+            month,
+            service.monthlyAmount,
+            timestamp,
+          );
+          bill = { id: billId, amount: service.monthlyAmount };
+          billAction = 'CREATED';
+        }
+        await this.db.run(
+          `UPDATE subscriptions SET status='STOPPED',"stoppedAt"=$1,"stoppedOn"=$2,
+           "stopReason"='Student archived',"finalMonthlyFee"=$3 WHERE id=$4`,
+          timestamp,
+          dhakaDate(),
+          bill.amount,
+          service.id,
+        );
+        await this.db.run('DELETE FROM route_schedules WHERE "studentId"=$1', service.id);
+        await this.db.run(
+          `INSERT INTO service_settlements(id,"subscriptionId","billId","stopDate","finalMonthlyFee",
+           reason,"previousBillAmount","billAction","createdBy","createdAt")
+           VALUES($1,$2,$3,$4,$5,'Student archived',$6,$7,$8,$9)`,
+          randomUUID(),
+          service.id,
+          bill.id,
+          dhakaDate(),
+          bill.amount,
+          previousBillAmount,
+          billAction,
+          actor.id,
+          timestamp,
+        );
+      }
+      await this.db.run(
+        `UPDATE stop_requests q SET status='APPROVED',note='Resolved by admin while archiving the student',"reviewedAt"=$1
+         WHERE q.status='PENDING' AND EXISTS(
+           SELECT 1 FROM subscriptions s WHERE s.id=q."subscriptionId" AND s."studentId"=$2
+         )`,
         timestamp,
         profile.id,
       );
@@ -189,12 +245,12 @@ export class ManagementService {
         actor.id,
         'STUDENT_ARCHIVED',
         profile.id,
-        `${stopped.rowCount} active subscription(s) stopped`,
+        `${activeServices.length} active subscription(s) stopped`,
       );
       return {
         studentId: profile.id,
         archivedAt: timestamp,
-        affectedSubscriptions: stopped.rowCount,
+        affectedSubscriptions: activeServices.length,
       };
     });
   }
@@ -215,6 +271,139 @@ export class ManagementService {
       );
       await this.notifications.audit(actor.id, 'STUDENT_RESTORED', profile.id);
       return { studentId: profile.id, archivedAt: null, affectedSubscriptions: 0 };
+    });
+  }
+
+  async stopStudentService(actor: User, enrollmentId: string, input: StopStudentServiceDto) {
+    return this.write(async () => {
+      const service = await this.db.get<Row>(
+        'SELECT * FROM subscriptions WHERE id=$1 FOR UPDATE',
+        enrollmentId,
+      );
+      if (!service) throw new NotFoundException('subscriptions record not found');
+      if (service.status !== 'ACTIVE')
+        throw new ConflictException('This transport service is already stopped');
+      const today = dhakaDate();
+      if (input.stopDate > today)
+        throw new BadRequestException('Stop date cannot be in the future');
+      if (input.stopDate.slice(0, 7) !== today.slice(0, 7))
+        throw new BadRequestException('Stop date must be in the current billing month');
+      if (input.stopDate < dhakaDate(service.startedAt))
+        throw new BadRequestException('Stop date cannot be before the service start date');
+
+      const month = input.stopDate.slice(0, 7);
+      let bill = await this.db.get<Row>(
+        'SELECT * FROM bills WHERE "subscriptionId"=$1 AND month=$2 FOR UPDATE',
+        enrollmentId,
+        month,
+      );
+      const previousBillAmount = bill?.amount ?? null;
+      let billAction: 'NO_BILL' | 'CREATED' | 'ADJUSTED' | 'UNCHANGED';
+      if (
+        bill &&
+        (await this.db.get(
+          `SELECT id FROM payment_submissions WHERE "billId"=$1 AND status='PENDING'`,
+          bill.id,
+        ))
+      )
+        throw new ConflictException('Review the pending payment before stopping this service');
+      if (!bill && input.finalMonthlyFee === 0) {
+        billAction = 'NO_BILL';
+      } else if (!bill) {
+        const billId = randomUUID();
+        await this.db.run(
+          `INSERT INTO bills(id,"guardianId","subscriptionId",month,amount,status,"createdAt")
+           VALUES($1,$2,$3,$4,$5,'UNPAID',$6)`,
+          billId,
+          service.guardianId,
+          enrollmentId,
+          month,
+          input.finalMonthlyFee,
+          now(),
+        );
+        bill = await this.db.get<Row>('SELECT * FROM bills WHERE id=$1', billId);
+        billAction = 'CREATED';
+      } else if (bill.amount === input.finalMonthlyFee) {
+        billAction = 'UNCHANGED';
+      } else if (bill.status === 'PAID') {
+        throw new ConflictException(
+          'A paid bill cannot be changed; use its paid amount as the final monthly fee',
+        );
+      } else {
+        await this.db.run(
+          `UPDATE bills SET amount=$1,status=$2 WHERE id=$3`,
+          input.finalMonthlyFee,
+          input.finalMonthlyFee === 0 ? 'WAIVED' : 'UNPAID',
+          bill.id,
+        );
+        bill = {
+          ...bill,
+          amount: input.finalMonthlyFee,
+          status: input.finalMonthlyFee === 0 ? 'WAIVED' : 'UNPAID',
+        };
+        billAction = 'ADJUSTED';
+      }
+
+      const timestamp = now();
+      const stoppedAt = `${input.stopDate}T00:00:00+06:00`;
+      await this.db.run(
+        `UPDATE subscriptions SET status='STOPPED',"stoppedAt"=$1,"stoppedOn"=$2,
+         "stopReason"=$3,"finalMonthlyFee"=$4 WHERE id=$5`,
+        stoppedAt,
+        input.stopDate,
+        input.reason ?? '',
+        input.finalMonthlyFee,
+        enrollmentId,
+      );
+      await this.db.run('DELETE FROM route_schedules WHERE "studentId"=$1', enrollmentId);
+      await this.db.run(
+        `UPDATE stop_requests SET status='APPROVED',note='Resolved by direct admin service stop',"reviewedAt"=$1
+         WHERE "subscriptionId"=$2 AND status='PENDING'`,
+        timestamp,
+        enrollmentId,
+      );
+      const settlementId = randomUUID();
+      await this.db.run(
+        `INSERT INTO service_settlements(id,"subscriptionId","billId","stopDate","finalMonthlyFee",
+         reason,"previousBillAmount","billAction","createdBy","createdAt")
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        settlementId,
+        enrollmentId,
+        bill?.id ?? null,
+        input.stopDate,
+        input.finalMonthlyFee,
+        input.reason ?? '',
+        previousBillAmount,
+        billAction,
+        actor.id,
+        timestamp,
+      );
+      await this.notifications.create(
+        service.guardianId,
+        'Transport service stopped',
+        `Service stopped on ${input.stopDate}. Final monthly fee: ${this.formatTaka(input.finalMonthlyFee)}.`,
+        enrollmentId,
+      );
+      await this.notifications.audit(
+        actor.id,
+        'STUDENT_SERVICE_STOPPED',
+        enrollmentId,
+        `${input.stopDate}; final fee ${input.finalMonthlyFee}; ${billAction}; ${input.reason ?? ''}`,
+      );
+      const student = (await this.students(actor, enrollmentId))[0];
+      return {
+        ...student,
+        settlement: {
+          id: settlementId,
+          billId: bill?.id ?? null,
+          stopDate: input.stopDate,
+          finalMonthlyFee: input.finalMonthlyFee,
+          reason: input.reason ?? '',
+          previousBillAmount,
+          billAction,
+        },
+        finalBill: bill ?? null,
+      };
     });
   }
 
@@ -308,6 +497,10 @@ export class ManagementService {
         existing as { shiftId: string; operatingDays: number[] } | undefined,
       );
       const status = input.status ?? existing?.status ?? 'ACTIVE';
+      if (existing && input.status === 'STOPPED' && existing.status === 'ACTIVE')
+        throw new BadRequestException(
+          'Use the stop-service action to set the stop date and final monthly fee',
+        );
       if (
         existing &&
         shiftId !== existing.shiftId &&
@@ -1004,6 +1197,12 @@ export class ManagementService {
     );
     if (!route) throw new BadRequestException('Select a stop on an active route');
     return route;
+  }
+  private formatTaka(poisha: number) {
+    return `৳${(poisha / 100).toLocaleString('en-BD', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
   }
   private async require(table: string, id: string): Promise<Row> {
     // Table identifiers only come from hard-coded service calls; values remain parameterized.

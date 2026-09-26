@@ -83,7 +83,7 @@ All endpoints below except registration/login require
 | GET | `/complaint-categories` | Supported dropdown values |
 | PATCH | `/admin/complaints/:id` | `{status:"OPEN"|"RESOLVED",note?}`; resolution needs note |
 | GET / POST | `/stop-requests` | Own history / new `{subscriptionId,reason}` |
-| PATCH | `/admin/stop-requests/:id/decision` | Admin approve/reject |
+| PATCH | `/admin/stop-requests/:id/decision` | Approve with `{decision:"APPROVED",stopDate,finalMonthlyFee,note?}` or reject with `{decision:"REJECTED",note}` |
 | GET | `/notifications` | Own newest 100 notifications |
 | PATCH | `/notifications/:id/read` | Mark own notification read |
 

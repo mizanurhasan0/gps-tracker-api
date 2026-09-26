@@ -1,4 +1,5 @@
 import { groupBy } from '../common/collections';
+import { dhakaDate } from '../common/dhaka-time';
 import {
   BadRequestException,
   ConflictException,
@@ -25,6 +26,7 @@ import {
   CreateRouteDto,
   CreateServiceRequestDto,
   StopRequestDto,
+  StopDecisionDto,
   RouteFaresDto,
   PickupPointDto,
 } from './transport.dto';
@@ -426,7 +428,7 @@ export class TransportService {
   }
   async stops(user: User) {
     return await this.db.all(
-      `SELECT q.*,u.name "guardianName",s."studentName" FROM stop_requests q
+      `SELECT q.*,u.name "guardianName",s."studentName",s."monthlyAmount",s."startedAt" FROM stop_requests q
       JOIN users u ON u.id = q."guardianId" JOIN subscriptions s ON s.id = q."subscriptionId"
       WHERE ($1::text = 'ADMIN' OR q."guardianId" = $2) ORDER BY q."createdAt" DESC`,
       user.role,
@@ -461,24 +463,118 @@ export class TransportService {
       return { id, status: 'PENDING' };
     });
   }
-  async reviewStop(actor: User, id: string, input: DecisionDto) {
+  async reviewStop(actor: User, id: string, input: StopDecisionDto) {
     this.validateDecision(input);
     return this.transaction(async () => {
       const request = await this.db.get<{
         status: string;
         guardianId: string;
         subscriptionId: string;
+        reason: string;
       }>(`SELECT * FROM stop_requests WHERE id = $1`, id);
       if (!request) throw new NotFoundException('Stop request not found');
       if (request.status !== 'PENDING')
         throw new ConflictException('This stop request has already been reviewed');
       const now = new Date().toISOString();
-      if (input.decision === 'APPROVED')
-        await this.db.run(
-          `UPDATE subscriptions SET status = 'STOPPED',"stoppedAt" = $1 WHERE id = $2`,
-          now,
-          request.subscriptionId,
+      if (input.decision === 'APPROVED') {
+        const subscription = await this.db.get<{
+          id: string;
+          guardianId: string;
+          monthlyAmount: number;
+          status: string;
+        }>('SELECT * FROM subscriptions WHERE id=$1 FOR UPDATE', request.subscriptionId);
+        if (!subscription || subscription.status !== 'ACTIVE')
+          throw new ConflictException('This transport service is already stopped');
+        const stopDate = input.stopDate!;
+        const finalMonthlyFee = input.finalMonthlyFee!;
+        const today = dhakaDate();
+        if (stopDate > today) throw new BadRequestException('Stop date cannot be in the future');
+        if (stopDate.slice(0, 7) !== today.slice(0, 7))
+          throw new BadRequestException('Stop date must be in the current billing month');
+        const startedAt = await this.db.get<{ startedAt: string }>(
+          'SELECT "startedAt" FROM subscriptions WHERE id=$1',
+          subscription.id,
         );
+        if (stopDate < dhakaDate(startedAt!.startedAt))
+          throw new BadRequestException('Stop date cannot be before the service start date');
+        const month = stopDate.slice(0, 7);
+        let bill = await this.db.get<{ id: string; amount: number; status: string }>(
+          'SELECT id,amount,status FROM bills WHERE "subscriptionId"=$1 AND month=$2 FOR UPDATE',
+          subscription.id,
+          month,
+        );
+        const previousBillAmount = bill?.amount ?? null;
+        let billAction: 'NO_BILL' | 'CREATED' | 'ADJUSTED' | 'UNCHANGED';
+        if (
+          bill &&
+          (await this.db.get(
+            `SELECT id FROM payment_submissions WHERE "billId"=$1 AND status='PENDING'`,
+            bill.id,
+          ))
+        )
+          throw new ConflictException('Review the pending payment before stopping this service');
+        if (!bill && finalMonthlyFee === 0) {
+          billAction = 'NO_BILL';
+        } else if (!bill) {
+          const billId = randomUUID();
+          await this.db.run(
+            `INSERT INTO bills(id,"guardianId","subscriptionId",month,amount,status,"createdAt")
+             VALUES($1,$2,$3,$4,$5,'UNPAID',$6)`,
+            billId,
+            subscription.guardianId,
+            subscription.id,
+            month,
+            finalMonthlyFee,
+            now,
+          );
+          bill = { id: billId, amount: finalMonthlyFee, status: 'UNPAID' };
+          billAction = 'CREATED';
+        } else if (bill.amount === finalMonthlyFee) {
+          billAction = 'UNCHANGED';
+        } else if (bill.status === 'PAID') {
+          throw new ConflictException(
+            'A paid bill cannot be changed; use its paid amount as the final monthly fee',
+          );
+        } else {
+          await this.db.run(
+            'UPDATE bills SET amount=$1,status=$2 WHERE id=$3',
+            finalMonthlyFee,
+            finalMonthlyFee === 0 ? 'WAIVED' : 'UNPAID',
+            bill.id,
+          );
+          bill = {
+            ...bill,
+            amount: finalMonthlyFee,
+            status: finalMonthlyFee === 0 ? 'WAIVED' : 'UNPAID',
+          };
+          billAction = 'ADJUSTED';
+        }
+        await this.db.run(
+          `UPDATE subscriptions SET status='STOPPED',"stoppedAt"=$1,"stoppedOn"=$2,
+           "stopReason"=$3,"finalMonthlyFee"=$4 WHERE id=$5`,
+          `${stopDate}T00:00:00+06:00`,
+          stopDate,
+          request.reason,
+          finalMonthlyFee,
+          subscription.id,
+        );
+        await this.db.run('DELETE FROM route_schedules WHERE "studentId"=$1', subscription.id);
+        await this.db.run(
+          `INSERT INTO service_settlements(id,"subscriptionId","billId","stopDate","finalMonthlyFee",
+           reason,"previousBillAmount","billAction","createdBy","createdAt")
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          randomUUID(),
+          subscription.id,
+          bill?.id ?? null,
+          stopDate,
+          finalMonthlyFee,
+          request.reason,
+          previousBillAmount,
+          billAction,
+          actor.id,
+          now,
+        );
+      }
       await this.db.run(
         `UPDATE stop_requests SET status = $1,note = $2,"reviewedAt" = $3 WHERE id = $4`,
         input.decision,
@@ -490,13 +586,19 @@ export class TransportService {
         request.guardianId,
         input.decision === 'APPROVED' ? 'Transport service stopped' : 'Stop request rejected',
         input.decision === 'APPROVED'
-          ? 'Your service has stopped. Previous bills remain in your payment history.'
+          ? `Your service stopped on ${input.stopDate}. Final monthly fee: ${this.formatTaka(input.finalMonthlyFee!)}.`
           : input.note!,
         id,
       );
       await this.notifications.audit(actor.id, `STOP_${input.decision}`, id, input.note);
       return { id, status: input.decision };
     });
+  }
+  private formatTaka(poisha: number) {
+    return `৳${(poisha / 100).toLocaleString('en-BD', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
   }
   private async transaction<T>(work: () => Promise<T>): Promise<T> {
     try {

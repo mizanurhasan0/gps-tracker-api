@@ -26,6 +26,7 @@ import {
   CreateStudentDto,
   ScheduleDto,
   SettingsDto,
+  StopStudentServiceDto,
   UpdateBannerDto,
   UpdateDriverDto,
   UpdateMaintenanceDto,
@@ -66,6 +67,13 @@ export class ManagementController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.service.restoreStudent(req.user, id);
+  }
+  @Roles('ADMIN') @Patch('admin/students/:id/stop') stopStudentService(
+    @Req() req: AuthRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() input: StopStudentServiceDto,
+  ) {
+    return this.service.stopStudentService(req.user, id, input);
   }
   @Roles('ADMIN') @Post('admin/drivers') driver(
     @Req() req: AuthRequest,

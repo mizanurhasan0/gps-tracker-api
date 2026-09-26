@@ -9,7 +9,8 @@ amounts are integer **poisha**. The matching mobile contracts are in
 |---|---|---|
 | GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,banners,requests,settings,schedules}`; guardians receive published image banners, while admins also receive hidden banners for management |
 | POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
-| PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId, legacy monthlyAmount, status ACTIVE/STOPPED |
+| PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId and legacy monthlyAmount; active services must use the stop action below |
+| PATCH | `/admin/students/:id/stop` | `{stopDate,finalMonthlyFee,reason?}`; non-destructively stops one shift and settles its current-month bill |
 | PATCH | `/admin/students/:id/archive` | Archives the canonical student resolved from an enrollment ID and stops all active shifts; returns `{studentId,archivedAt,affectedSubscriptions}` |
 | PATCH | `/admin/students/:id/restore` | Restores the canonical profile without reactivating stopped shifts; returns `{studentId,archivedAt:null,affectedSubscriptions:0}` |
 | GET | `/admin/students/archived` | Archived students as the existing enrollment-shaped student rows, including `archivedAt` and `archivedBy` |
@@ -57,6 +58,14 @@ the profile from normal admin and guardian overviews, and preserves attendance,
 bills, payments, requests and audit history. Restore makes the profile available
 again but deliberately leaves its former subscriptions stopped. Archived profiles
 cannot be edited, reused by ID, or silently reused by name until restored.
+
+Stopping a service accepts only a Dhaka-calendar date in the current month, no later
+than today and no earlier than enrollment. An unpaid bill is adjusted; a zero final
+fee waives an existing bill or creates no bill when none exists. Pending payment
+evidence must be reviewed first. Paid bills are immutable and can only be stopped
+with the already-paid amount. The settlement, reason and previous amount are kept
+in `service_settlements`; attendance/payment history remains intact and current
+route-schedule assignments are removed. Future bill generation excludes the service.
 
 `photoUrl` allows an empty value, HTTPS URI, or JPEG/PNG base64 data URI up to
 450,000 characters. The server accepts JSON bodies up to 768 KiB. The mobile app

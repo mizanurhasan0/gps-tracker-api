@@ -145,14 +145,15 @@ export async function assertScheduledAttendance(
   enrollmentId: string,
   date: string,
 ) {
-  const service = await db.get<{ operatingDays: number[]; status: string }>(
-    'SELECT "operatingDays",status FROM subscriptions WHERE id=$1',
-    enrollmentId,
-  );
+  const service = await db.get<{
+    operatingDays: number[];
+    status: string;
+    stoppedOn: string | null;
+  }>('SELECT "operatingDays",status,"stoppedOn" FROM subscriptions WHERE id=$1', enrollmentId);
   const settings = await scheduleSettings(db);
   if (
     !service ||
-    service.status !== 'ACTIVE' ||
+    (service.status !== 'ACTIVE' && (!service.stoppedOn || date > service.stoppedOn)) ||
     !scheduledOn(service.operatingDays, settings.operatingDays, date)
   )
     throw new BadRequestException('This student has no scheduled transport on the selected day');

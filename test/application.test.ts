@@ -22,6 +22,7 @@ interface Route {
 interface Identified {
   id: string;
   status: string;
+  monthlyAmount: number;
 }
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.HISTORY_TEST_DATABASE_URL;
@@ -744,6 +745,12 @@ test(
             'POST',
             201,
           );
+          const listedStop = (await request<Array<Identified & { subscriptionId: string; startedAt: string }>>(
+            '/stop-requests',
+            admin.token,
+          )).find((item) => item.id === stop.id)!;
+          assert.equal(listedStop.monthlyAmount, active.monthlyAmount);
+          assert.ok(listedStop.startedAt);
           await request(
             '/stop-requests',
             guardian.token,
@@ -755,6 +762,19 @@ test(
             `/admin/stop-requests/${stop.id}/decision`,
             admin.token,
             { decision: 'APPROVED' },
+            'PATCH',
+            400,
+          );
+          await request(
+            `/admin/stop-requests/${stop.id}/decision`,
+            admin.token,
+            {
+              decision: 'APPROVED',
+              stopDate: new Intl.DateTimeFormat('en-CA', {
+                timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit',
+              }).format(new Date()),
+              finalMonthlyFee: active.monthlyAmount,
+            },
             'PATCH',
           );
         }

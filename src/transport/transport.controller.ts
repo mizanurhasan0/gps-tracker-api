@@ -11,6 +11,7 @@ import {
   RouteFaresDto,
   PickupPointDto,
   StopRequestDto,
+  StopDecisionDto,
 } from './transport.dto';
 import { TransportService } from './transport.service';
 @Controller()
@@ -111,7 +112,7 @@ export class TransportController {
   reviewStop(
     @Req() req: AuthRequest,
     @Param('id') id: string,
-    @Body() input: DecisionDto,
+    @Body() input: StopDecisionDto,
   ) {
     return this.transport.reviewStop(req.user, id, input);
   }

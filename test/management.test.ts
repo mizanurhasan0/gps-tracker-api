@@ -52,7 +52,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   let vehicle:Row,route:Row,student:Row,secondStudent:Row,driver:Row,maintenance:Row;
 
   await t.test('upgrades real version 1 data and backfills student and driver IDs',async()=>{
-    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7},{version:8},{version:9},{version:10},{version:11}]);
+    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7},{version:8},{version:9},{version:10},{version:11},{version:12}]);
     const migratedService=await db.get('SELECT * FROM subscriptions WHERE id=$1',legacy.student);
     assert.equal(migratedService.shiftId,'MORNING');
     assert.deepEqual(migratedService.operatingDays,[0,1,2,3,4,5,6]);
@@ -216,12 +216,30 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     assert.equal(report.students.total,3);assert.equal(report.ledger.length,4);
   });
   await t.test('stopping a student revokes their assigned operational projection',async()=>{
-    await request(`/admin/students/${student.id}`,admin.token,{status:'STOPPED'},'PATCH');
+    const stopDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Dhaka',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+    await request('/admin/bills/generate',admin.token,{month:stopDate.slice(0,7)},'POST',201);
+    await request(`/admin/students/${student.id}`,admin.token,{status:'STOPPED'},'PATCH',400);
+    const pendingStop=await request('/stop-requests',guardian.token,{subscriptionId:student.id,reason:'Cannot continue'},'POST',201);
+    const stopped=await request(`/admin/students/${student.id}/stop`,admin.token,{stopDate,finalMonthlyFee:0,reason:'Service discontinued'},'PATCH');
+    assert.equal(stopped.stoppedOn,stopDate);assert.equal(stopped.stopReason,'Service discontinued');
+    assert.equal(stopped.finalBill.amount,0);assert.equal(stopped.finalBill.status,'WAIVED');assert.equal(stopped.settlement.billAction,'ADJUSTED');
+    assert.equal((await db.get('SELECT count(*)::int count FROM service_settlements WHERE "subscriptionId"=$1',student.id)).count,1);
+    const resolvedStop=await db.get('SELECT status,note,"reviewedAt" FROM stop_requests WHERE id=$1',pendingStop.id);
+    assert.equal(resolvedStop.status,'APPROVED');assert.match(resolvedStop.note,/direct admin/);assert.ok(resolvedStop.reviewedAt);
+    assert.equal((await request(`/payments/monthly?month=${stopDate.slice(0,7)}`,admin.token)).find((bill:Row)=>bill.subscriptionId===student.id).status,'WAIVED');
+    await request('/payments/submissions',guardian.token,{billId:stopped.finalBill.id,method:'BKASH',senderNumber:'01700000002',recipientNumber:'01700000001',transactionId:'waived-bill',amount:1},'POST',409);
+    const noBillService=await request('/admin/students',admin.token,{studentId:student.studentId,studentName:student.studentName,guardianPhone:guardian.user.phone,routeId:route.id,stopId:route.stops[0].id,shiftId:'DAY'},'POST',201);
+    const noBillStop=await request(`/admin/students/${noBillService.id}/stop`,admin.token,{stopDate,finalMonthlyFee:0},'PATCH');
+    assert.equal(noBillStop.finalBill,null);assert.equal(noBillStop.settlement.billAction,'NO_BILL');
+    assert.equal((await db.get('SELECT count(*)::int count FROM bills WHERE "subscriptionId"=$1',noBillService.id)).count,0);
     const overview=await request('/management/overview',guardian.token);
     assert.equal(overview.students[0].status,'STOPPED');assert.deepEqual(overview.drivers,[]);assert.deepEqual(overview.schedules,[]);
     assert.equal(overview.students[0].driverName,null);assert.equal(overview.students[0].driverPhone,null);
     assert.equal(overview.attendance.length,2,'historical attendance stays available');
+    assert.deepEqual(overview.schedules,[],'current route assignment is removed');
     assert.deepEqual(await request('/vehicles',guardian.token),{vehicles:[]});
+    await request('/admin/bills/generate',admin.token,{month:stopDate.slice(0,7)},'POST',201);
+    assert.equal((await db.get('SELECT count(*)::int count FROM bills WHERE "subscriptionId"=$1',noBillService.id)).count,0,'zero settlement prevents later bill generation');
     await request(`/admin/students/${student.id}`,admin.token,{status:'ACTIVE'},'PATCH',400);
     assert.equal((await request('/management/overview',guardian.token)).students[0].status,'STOPPED');
   });

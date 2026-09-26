@@ -4,6 +4,8 @@ import {
   ArrayMinSize,
   ArrayUnique,
   IsArray,
+  IsDefined,
+  IsDateString,
   IsIn,
   IsInt,
   IsOptional,
@@ -12,9 +14,11 @@ import {
   IsUUID,
   Max,
   MaxLength,
+  Matches,
   Min,
   MinLength,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 import { trim } from '../auth/auth.dto';
 import { StudentProfileDto } from '../management/management.dto';
@@ -85,6 +89,16 @@ export class ComplaintDto {
 export class StopRequestDto {
   @IsUUID() subscriptionId!: string;
   @Transform(trim) @IsString() @MinLength(5) @MaxLength(500) reason!: string;
+}
+export class StopDecisionDto {
+  @IsIn(['APPROVED', 'REJECTED']) decision!: 'APPROVED' | 'REJECTED';
+  @IsOptional() @Transform(trim) @IsString() @MaxLength(500) note?: string;
+  @ValidateIf((input: StopDecisionDto) => input.decision === 'APPROVED')
+  @IsDefined() @Matches(/^\d{4}-\d{2}-\d{2}$/) @IsDateString({ strict: true })
+  stopDate?: string;
+  @ValidateIf((input: StopDecisionDto) => input.decision === 'APPROVED')
+  @IsDefined() @IsInt() @Min(0) @Max(100_000_000)
+  finalMonthlyFee?: number;
 }
 export class ComplaintReviewDto {
   @IsIn(['OPEN', 'RESOLVED']) status!: 'OPEN' | 'RESOLVED';

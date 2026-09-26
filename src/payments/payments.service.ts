@@ -21,7 +21,7 @@ export interface Bill {
   subscriptionId: string;
   month: string;
   amount: number;
-  status: 'UNPAID' | 'PAID';
+  status: 'UNPAID' | 'PAID' | 'WAIVED';
   createdAt: string;
   paidAt: string | null;
 }
@@ -124,15 +124,24 @@ export class PaymentsService {
         guardianId: string;
         monthlyAmount: number;
         studentName: string;
+        stoppedOn: string | null;
+        finalMonthlyFee: number | null;
       }>(
         `SELECT * FROM subscriptions
         WHERE to_char("startedAt"::timestamptz AT TIME ZONE 'Asia/Dhaka', 'YYYY-MM') <= $1
-        AND ("stoppedAt" IS NULL OR to_char("stoppedAt"::timestamptz AT TIME ZONE 'Asia/Dhaka', 'YYYY-MM') >= $2)`,
+        AND ("stoppedAt" IS NULL OR to_char("stoppedAt"::timestamptz AT TIME ZONE 'Asia/Dhaka', 'YYYY-MM') >= $2)
+        FOR UPDATE`,
         month,
         month,
       );
       let created = 0;
       for (const subscription of subscriptions) {
+        const amount =
+          subscription.stoppedOn?.slice(0, 7) === month &&
+          subscription.finalMonthlyFee != null
+            ? subscription.finalMonthlyFee
+            : subscription.monthlyAmount;
+        if (amount === 0) continue;
         const id = randomUUID();
         const result = await this.db.run(
           `INSERT INTO bills (id,"guardianId","subscriptionId",month,amount,status,"createdAt")
@@ -141,7 +150,7 @@ export class PaymentsService {
           subscription.guardianId,
           subscription.id,
           month,
-          subscription.monthlyAmount,
+          amount,
           new Date().toISOString(),
         );
         if (result.rowCount) {
@@ -170,6 +179,7 @@ export class PaymentsService {
         );
         if (!bill) throw new NotFoundException('Bill not found');
         if (bill.status === 'PAID') throw new ConflictException('This bill is already paid');
+        if (bill.status === 'WAIVED') throw new ConflictException('This bill has been waived');
         if (bill.amount !== input.amount)
           throw new BadRequestException(
             'Send the full bill amount. Partial payments are not supported yet',

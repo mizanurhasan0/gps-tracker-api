@@ -34,6 +34,11 @@ export class UpdateStudentDto extends StudentDetailsDto {
   @IsOptional() @IsUUID() routeId?: string;
   @IsOptional() @IsUUID() stopId?: string;
 }
+export class StopStudentServiceDto {
+  @Matches(/^\d{4}-\d{2}-\d{2}$/) @IsDateString({strict:true}) stopDate!: string;
+  @IsInt() @Min(0) @Max(100000000) finalMonthlyFee!: number;
+  @IsOptional() @Transform(trim) @IsString() @MaxLength(1000) reason?: string;
+}
 export class DriverDetailsDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(30) nid?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(500) address?: string;
