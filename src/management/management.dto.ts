@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator';
 import { trim } from '../auth/auth.dto';
 
 export class StudentScheduleDto {
@@ -10,6 +10,8 @@ export class StudentProfileDto extends StudentScheduleDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(40) studentCode?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(40) className?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(20) roll?: string;
+  @ValidateIf((_, value) => value !== undefined && value !== '') @Transform(trim) @Matches(/^\d{4}-\d{2}-\d{2}$/) @IsDateString({strict:true}) dateOfBirth?: string;
+  @IsOptional() @Transform(trim) @IsIn(['', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']) bloodGroup?: string;
   @IsOptional() @IsString() @MaxLength(450000) @Matches(/^(?:|https:\/\/[^\s]+|data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2})$/) photoUrl?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(500) pickupAddress?: string;
   @IsOptional() @Transform(trim) @IsString() @MaxLength(500) dropAddress?: string;

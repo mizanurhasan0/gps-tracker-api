@@ -12,6 +12,8 @@ export const sharedProfileFields = [
   'studentCode',
   'className',
   'roll',
+  'dateOfBirth',
+  'bloodGroup',
   'photoUrl',
   'emergencyContact',
 ] as const;

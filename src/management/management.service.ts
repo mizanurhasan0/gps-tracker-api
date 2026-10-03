@@ -46,6 +46,8 @@ const profileFields = [
   'studentCode',
   'className',
   'roll',
+  'dateOfBirth',
+  'bloodGroup',
   'photoUrl',
   'pickupAddress',
   'dropAddress',
@@ -140,7 +142,7 @@ export class ManagementService {
 
   students(user: User, id?: string, archived = false) {
     return this.db.all<Row>(
-      `SELECT p.*,c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",c."archivedAt",c."archivedBy",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",s."stoppedAt",s."stoppedOn",s."stopReason",s."finalMonthlyFee",
+      `SELECT p.*,c."studentCode",c."className",c.roll,c."dateOfBirth",c."bloodGroup",c."photoUrl",c."emergencyContact",c."archivedAt",c."archivedBy",s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",s."stoppedAt",s."stoppedOn",s."stopReason",s."finalMonthlyFee",
       u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverName" ELSE NULL END "driverName",
       CASE WHEN $1::text='ADMIN' OR (s.status='ACTIVE' AND r.active=1) THEN v."driverPhone" ELSE NULL END "driverPhone"
@@ -599,7 +601,7 @@ export class ManagementService {
         );
       }
       await this.db.run(
-        `UPDATE student_profiles SET "studentName"=$1,${sharedProfileFields.map((field, i) => `"${field}"=$${i + 2}`).join(',')} WHERE id=$7`,
+        `UPDATE student_profiles SET "studentName"=$1,${sharedProfileFields.map((field, i) => `"${field}"=$${i + 2}`).join(',')} WHERE id=$${sharedProfileFields.length + 2}`,
         studentName,
         ...sharedProfileFields.map((field) => input[field] ?? profile[field]),
         profile.id,
@@ -610,14 +612,14 @@ export class ManagementService {
         profile.id,
       );
       await this.db.run(
-        `UPDATE service_requests SET "studentName"=$1,${sharedProfileFields.map((field, i) => `"${field}"=$${i + 2}`).join(',')} WHERE "studentId"=$7`,
+        `UPDATE service_requests SET "studentName"=$1,${sharedProfileFields.map((field, i) => `"${field}"=$${i + 2}`).join(',')} WHERE "studentId"=$${sharedProfileFields.length + 2}`,
         studentName,
         ...sharedProfileFields.map((field) => input[field] ?? profile[field]),
         profile.id,
       );
       const old = await this.require('students', id);
       await this.db.run(
-        `UPDATE students SET ${profileFields.map((f, i) => `"${f}"=$${i + 1}`).join(',')} WHERE id=$8`,
+        `UPDATE students SET ${profileFields.map((f, i) => `"${f}"=$${i + 1}`).join(',')} WHERE id=$${profileFields.length + 1}`,
         ...profileFields.map(
           (f) =>
             input[f] ??
@@ -630,7 +632,7 @@ export class ManagementService {
       );
       if (!existingId)
         await this.db.run(
-          `UPDATE service_requests SET ${profileFields.map((f, i) => `"${f}"=$${i + 1}`).join(',')} WHERE id=(SELECT "requestId" FROM subscriptions WHERE id=$8)`,
+          `UPDATE service_requests SET ${profileFields.map((f, i) => `"${f}"=$${i + 1}`).join(',')} WHERE id=(SELECT "requestId" FROM subscriptions WHERE id=$${profileFields.length + 1})`,
           ...profileFields.map((f) => input[f] ?? ''),
           id,
         );

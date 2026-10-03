@@ -23,6 +23,10 @@ charges for each student journey on the same route.
 
 ## Start the transport service
 
+For local Docker development and one-command updates, see
+[Run the API locally with Docker](docs/LOCAL_DOCKER.md). Use
+`npm run local:update` (or `bash scripts/local.sh update` without host Node).
+
 Requires **Node >=22.22.0** and PostgreSQL. Docker can run both services without
 installing Node or PM2 on the host; see the deployment guide.
 

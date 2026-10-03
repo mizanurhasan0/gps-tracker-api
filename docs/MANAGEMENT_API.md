@@ -27,8 +27,11 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | PUT | `/admin/routes/:id/schedule` | `{entries:[{label,time,period,position,stopId?,studentId?}]}`; atomic replacement |
 | GET | `/admin/reports?month=YYYY-MM` | Monthly billing, cash flow, current counts, attendance counts and ledger rows |
 
-Student profile fields are `studentCode,className,roll,photoUrl,pickupAddress,
-dropAddress,emergencyContact`. The existing guardian admission endpoint
+Student profile fields are `studentCode,className,roll,dateOfBirth,bloodGroup,
+photoUrl,pickupAddress,dropAddress,emergencyContact`. `dateOfBirth` accepts an
+empty value or a real `YYYY-MM-DD` date; `bloodGroup` accepts an empty value or
+`A+`, `A-`, `B+`, `B-`, `AB+`, `AB-`, `O+`, or `O-`. Migration 13 adds both
+fields with empty defaults to existing student profiles and services. The existing guardian admission endpoint
 `POST /requests/guardian/new` accepts these fields alongside
 `studentName,routeId,stopId,dropoffStopId?`. Ownership comes from the session.
 A selected destination uses the configured boarding/destination fare on approval.

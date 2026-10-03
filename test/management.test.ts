@@ -52,7 +52,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   let vehicle:Row,route:Row,student:Row,secondStudent:Row,driver:Row,maintenance:Row;
 
   await t.test('upgrades real version 1 data and backfills student and driver IDs',async()=>{
-    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7},{version:8},{version:9},{version:10},{version:11},{version:12}]);
+    assert.deepEqual(await db.all('SELECT version FROM app_migrations ORDER BY version'),[{version:1},{version:2},{version:3},{version:4},{version:5},{version:6},{version:7},{version:8},{version:9},{version:10},{version:11},{version:12},{version:13}]);
     const migratedService=await db.get('SELECT * FROM subscriptions WHERE id=$1',legacy.student);
     assert.equal(migratedService.shiftId,'MORNING');
     assert.deepEqual(migratedService.operatingDays,[0,1,2,3,4,5,6]);
@@ -90,18 +90,23 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
       BEGIN IF nextval('student_retry_once')=1 THEN RAISE EXCEPTION 'retry' USING ERRCODE='40001'; END IF; RETURN NEW; END; $$;
       CREATE TRIGGER student_retry_once BEFORE INSERT ON students FOR EACH ROW EXECUTE FUNCTION student_retry_once()`);
     try {
-      student=await request('/admin/students',admin.token,{studentName:'Abdullah',guardianPhone:guardian.user.phone,routeId:route.id,stopId:route.stops[0].id,className:'Class 6',roll:'21',pickupAddress:'Uttara',emergencyContact:'01700000004',photoUrl:'data:image/jpeg;base64,'+'A'.repeat(150000)},'POST',201);
+      student=await request('/admin/students',admin.token,{studentName:'Abdullah',guardianPhone:guardian.user.phone,routeId:route.id,stopId:route.stops[0].id,className:'Class 6',roll:'21',dateOfBirth:'2015-01-12',bloodGroup:'B+',pickupAddress:'Uttara',emergencyContact:'01700000004',photoUrl:'data:image/jpeg;base64,'+'A'.repeat(150000)},'POST',201);
     } finally {
       await db.exec('DROP TRIGGER student_retry_once ON students; DROP FUNCTION student_retry_once(); DROP SEQUENCE student_retry_once');
     }
     assert.equal(student.className,'Class 6');assert.equal(student.monthlyAmount,250000);assert.equal(student.guardianId,guardian.user.id);
+    assert.equal(student.dateOfBirth,'2015-01-12');assert.equal(student.bloodGroup,'B+');
     assert.equal((await request('/requests/mine',guardian.token))[0].className,'Class 6');
     await request(`/admin/students/${student.id}`,admin.token,{guardianPhone:other.user.phone},'PATCH',400);
     await request(`/admin/students/${student.id}`,admin.token,{photoUrl:'file:///private/secret'},'PATCH',400);
     await request(`/admin/students/${student.id}`,admin.token,{photoUrl:'data:image/svg+xml;base64,AAAA'},'PATCH',400);
     await request(`/admin/students/${student.id}`,admin.token,{photoUrl:'data:image/png;base64,'+'A'.repeat(450001)},'PATCH',400);
+    await request(`/admin/students/${student.id}`,admin.token,{dateOfBirth:'2015-02-30'},'PATCH',400);
+    await request(`/admin/students/${student.id}`,admin.token,{bloodGroup:'X+'},'PATCH',400);
     const updated=await request(`/admin/students/${student.id}`,admin.token,{roll:'22',monthlyAmount:260000},'PATCH');
     assert.equal(updated.roll,'22');assert.equal(updated.monthlyAmount,260000);
+    const cleared=await request(`/admin/students/${student.id}`,admin.token,{dateOfBirth:'',bloodGroup:''},'PATCH');
+    assert.equal(cleared.dateOfBirth,'');assert.equal(cleared.bloodGroup,'');
   });
   await t.test('vehicle metadata accepts cleared dates while rejecting malformed nonempty dates',async()=>{
     const cleared=await request(`/vehicles/${vehicle.id}`,admin.token,{model:'Updated van',purchaseDate:'',fitnessExpiresAt:'',licenseExpiresAt:''},'PATCH');
@@ -119,12 +124,13 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
   });
   await t.test('guardian admission profile fields survive approval and cannot override fare or ownership',async()=>{
     await request('/requests/guardian/new',other.token,{studentName:'Ayesha',routeId:route.id,stopId:route.stops[1].id,monthlyAmount:1},'POST',400);
-    const admission=await request('/requests/guardian/new',other.token,{studentName:'Ayesha',routeId:route.id,stopId:route.stops[1].id,className:'Class 5',roll:'9',pickupAddress:'Sector 8',dropAddress:'Madrasa'},'POST',201);
+    const admission=await request('/requests/guardian/new',other.token,{studentName:'Ayesha',routeId:route.id,stopId:route.stops[1].id,className:'Class 5',roll:'9',dateOfBirth:'2016-04-09',bloodGroup:'O+',pickupAddress:'Sector 8',dropAddress:'Madrasa'},'POST',201);
     await request(`/admin/requests/${admission.id}/decision`,admin.token,{decision:'APPROVED'},'PATCH');
     const overview=await request('/management/overview',other.token);
     assert.equal(overview.students.length,1);secondStudent=overview.students[0];
     assert.equal(secondStudent.className,'Class 5');assert.equal(secondStudent.roll,'9');assert.equal(secondStudent.monthlyAmount,250000);
     assert.equal(secondStudent.pickupAddress,'Sector 8');
+    assert.equal(secondStudent.dateOfBirth,'2016-04-09');assert.equal(secondStudent.bloodGroup,'O+');
   });
   await t.test('driver assignment persists and guardian projection omits private employment information',async()=>{
     driver=await request('/admin/drivers',admin.token,{name:'Nur Alam',phone:'01700000005',nid:'1234567890',address:'Dhaka',joiningDate:'2025-01-12',monthlySalary:1200000,vehicleId:vehicle.id},'POST',201);

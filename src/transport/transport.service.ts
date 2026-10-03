@@ -213,7 +213,7 @@ export class TransportService {
   }
   async requests(user: User) {
     return await this.db.all(
-      `SELECT q.*,c."studentName",c."studentCode",c."className",c.roll,c."photoUrl",c."emergencyContact",u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",
+      `SELECT q.*,c."studentName",c."studentCode",c."className",c.roll,c."dateOfBirth",c."bloodGroup",c."photoUrl",c."emergencyContact",u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",
       v.name "vehicleName" FROM service_requests q JOIN student_profiles c ON c.id=q."studentId" JOIN users u ON u.id = q."guardianId"
       JOIN routes r ON r.id = q."routeId" JOIN stops t ON t.id = q."stopId" LEFT JOIN stops d ON d.id = q."dropoffStopId" JOIN vehicles v ON v.id = r."vehicleId"
       WHERE ($1::text = 'ADMIN' OR q."guardianId" = $2) ORDER BY q."createdAt" DESC`,
@@ -251,7 +251,7 @@ export class TransportService {
       if (input.studentId) for (const field of sharedProfileFields) input[field] = profile[field];
       else
         await this.db.run(
-          `UPDATE student_profiles SET ${sharedProfileFields.map((field, i) => `"${field}"=$${i + 1}`).join(',')} WHERE id=$6`,
+          `UPDATE student_profiles SET ${sharedProfileFields.map((field, i) => `"${field}"=$${i + 1}`).join(',')} WHERE id=$${sharedProfileFields.length + 1}`,
           ...sharedProfileFields.map((field) => input[field] ?? profile[field]),
           profile.id,
         );
@@ -271,7 +271,7 @@ export class TransportService {
         operatingDays,
       );
       await this.db.run(
-        `UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7 WHERE id=$8`,
+        `UPDATE service_requests SET "className"=$1,roll=$2,"studentCode"=$3,"photoUrl"=$4,"pickupAddress"=$5,"dropAddress"=$6,"emergencyContact"=$7,"dateOfBirth"=$8,"bloodGroup"=$9 WHERE id=$10`,
         input.className ?? '',
         input.roll ?? '',
         input.studentCode ?? '',
@@ -279,6 +279,8 @@ export class TransportService {
         input.pickupAddress ?? '',
         input.dropAddress ?? '',
         input.emergencyContact ?? '',
+        input.dateOfBirth ?? '',
+        input.bloodGroup ?? '',
         id,
       );
       await this.notifications.admins(

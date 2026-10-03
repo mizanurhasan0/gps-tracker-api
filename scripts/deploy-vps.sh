@@ -7,7 +7,11 @@ deploy_path=${1:?Missing deployment path}
 revision=${2:?Missing revision or --check}
 cd "$deploy_path"
 [[ -f compose.yml && -f .env ]] || { echo 'Existing compose.yml and private .env are required.' >&2; exit 1; }
+[[ ! -L .env ]] || { echo 'VPS .env must be a regular file, not a symlink.' >&2; exit 1; }
 [[ -z "$(git status --porcelain)" ]] || { echo 'VPS checkout has local changes; refusing to overwrite them.' >&2; exit 1; }
+# The deployment account needs the file for Compose, but other users must not
+# read production credentials. This also protects copies made in later backups.
+chmod 600 .env
 command -v flock >/dev/null
 if docker info >/dev/null 2>&1; then
   docker_command=(docker)
@@ -59,6 +63,8 @@ trap 'echo "Deployment failed. Inspect the service and backup at $backup_dir; no
 
 git merge --ff-only "$revision"
 [[ "$(git rev-parse HEAD)" == "$revision" ]] || { echo 'Checkout does not match release.' >&2; exit 1; }
+# Revalidate the release's Compose file with the private server environment.
+"${compose[@]}" config --quiet
 # Build while the current API is still serving. Do not recreate PostgreSQL.
 "${compose[@]}" build --build-arg "APP_REVISION=$revision" api
 "${compose[@]}" exec -T postgres pg_dump -U postgres -d gps_tracker -Fc > "$backup_dir/postgres.dump"

@@ -100,6 +100,7 @@ function remoteFixture(t) {
   f.git('bundle', 'create', bundle, 'main');
   f.mock('flock', 'exit 0');
   f.mock('docker', `case "$*" in
+    *'config --quiet'*) if [[ "\u0024{FAIL_RELEASE_CONFIG:-0}" == 1 && "$(grep -c 'config --quiet' "$COMMAND_LOG")" -ge 2 ]]; then exit 1; fi ;;
     *'ps -q postgres'*) echo postgres-id ;;
     *'ps -q api'*) echo api-id ;;
     *'inspect --format {{.Image}}'*) echo sha256:old-image ;;
@@ -117,6 +118,7 @@ test('remote build and verified backup precede API-only recreation', t => {
   const result = f.runRemote();
   assert.equal(result.status, 0, result.stderr);
   const commands = f.commands();
+  assert.equal((commands.match(/config --quiet/g) || []).length, 2);
   assert.ok(commands.indexOf('build --build-arg') < commands.indexOf('pg_dump'));
   assert.ok(commands.indexOf('pg_restore --list') < commands.indexOf('up -d'));
   assert.match(commands, /up -d --no-deps --wait --wait-timeout 120 api/);
@@ -126,6 +128,29 @@ test('remote build and verified backup precede API-only recreation', t => {
   const backup = path.join(backupRoot, fs.readdirSync(backupRoot)[0]);
   assert.equal(fs.readFileSync(path.join(backup, 'deployed-commit'), 'utf8').trim(), f.revision);
   assert.equal(fs.statSync(backup).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(path.join(f.repo, '.env')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(backup, '.env')).mode & 0o777, 0o600);
+});
+
+test('remote preflight refuses a symlinked secret file before touching services', t => {
+  const f = remoteFixture(t);
+  const secret = path.join(f.root, 'shared-env');
+  fs.renameSync(path.join(f.repo, '.env'), secret);
+  fs.chmodSync(secret, 0o644);
+  fs.symlinkSync(secret, path.join(f.repo, '.env'));
+  const result = f.runRemote();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /regular file, not a symlink/);
+  assert.doesNotMatch(f.commands(), /docker /);
+  assert.equal(fs.statSync(secret).mode & 0o777, 0o644);
+});
+
+test('invalid release Compose configuration stops before build or database backup', t => {
+  const f = remoteFixture(t);
+  const result = f.runRemote({ FAIL_RELEASE_CONFIG: '1' });
+  assert.notEqual(result.status, 0);
+  assert.equal((f.commands().match(/config --quiet/g) || []).length, 2);
+  assert.doesNotMatch(f.commands(), /build --build-arg|pg_dump|up -d/);
 });
 
 test('failed remote database backup never recreates the API', t => {

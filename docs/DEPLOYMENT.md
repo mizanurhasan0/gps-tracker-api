@@ -48,13 +48,18 @@ no spaces. Local tools: Bash, Git, SSH/SCP, Node and installed npm dependencies.
 VPS tools: Bash, Git, gzip, flock, Docker and Docker Compose with `--wait` support.
 Docker must work as the SSH user or through that user's sudo privileges.
 The script does not alter user privileges. Preserve the server's private `.env`.
+The VPS preflight requires `.env` to be a regular file and sets its permissions
+to `0600` before reading it; no secret values are printed. If a secret manager
+currently provides `.env` as a symlink, place a private regular file at the
+checkout path before deploying.
 
 ## What happens on the VPS
 
 1. Verify the uploaded bundle and commit; acquire the deployment lock.
 2. Save previous source, commit, `.env` and Compose file to a private directory
    under `/home/hasan/gps-deploy-backups/` (next to the checkout).
-3. Tag the previous running API image for recovery, then fast-forward the checkout.
+3. Tag the previous running API image for recovery, then fast-forward the checkout
+   and validate the release's Compose configuration against the server `.env`.
 4. Build the new API while the existing API continues serving.
 5. Dump `gps_tracker` using PostgreSQL's custom archive format and verify that
    `pg_restore --list` can read it. A failed backup stops deployment.
