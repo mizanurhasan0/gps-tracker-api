@@ -28,6 +28,7 @@ export class PaymentSubmissionDto extends PaymentEvidenceDto {
   @Transform(trim) @IsString() @MinLength(1) @MaxLength(100) recipientNumber!: string;
   // All monetary amounts are integer poisha, never binary floating-point taka.
   @IsInt() @Min(1) @Max(100_000_000) amount!: number;
+  @IsOptional() @IsInt() @Min(0) @Max(100_000_000) creditApplied?: number;
 }
 export class DecisionDto {
   @IsIn(['APPROVED', 'REJECTED']) decision!: 'APPROVED' | 'REJECTED';

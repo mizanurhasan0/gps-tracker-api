@@ -45,6 +45,17 @@ export class PaymentsController {
     return this.payments.listSubmissions(req.user);
   }
   @Roles('GUARDIAN')
+  @Get('payments/credit') credit(@Req() req: AuthRequest) {
+    return this.payments.credit(req.user);
+  }
+  @Roles('GUARDIAN')
+  @Post('payments/bills/:id/pay-with-credit') payWithCredit(
+    @Req() req: AuthRequest,
+    @Param('id') id: string,
+  ) {
+    return this.payments.payWithCredit(req.user, id);
+  }
+  @Roles('GUARDIAN')
   @Post('payments/submissions')
   submit(@Req() req: AuthRequest, @Body() input: PaymentSubmissionDto) {
     return this.payments.submit(req.user, input);

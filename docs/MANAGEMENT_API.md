@@ -112,10 +112,13 @@ calendar dates, and next service cannot precede service date.
 
 Ledger types are INCOME, EXPENSE and INVESTMENT. Monthly reports separate
 investment from revenue and profit. Expected/paid/due totals follow bill month;
-fareReceived follows the actual bill paidAt month in Asia/Dhaka. Net cash income
+fareReceived sums approved external transfer amounts by review month in Asia/Dhaka,
+including any overpayment credited as an advance. Applying existing advance to a
+later bill does not count as new cash. Legacy paid bills without a payment submission
+still contribute their bill amount. Net cash income
 is received fares plus other income minus expenses. Manual ledger income should
 be used for other receipts; recording already-paid student bills again would
-double-count them. Existing manual bKash/Rocket bill approval remains the source
+double-count them. Manual payment approval remains the source
 of payment truth. Existing bill amounts remain unchanged by later fare edits.
 Before changing a fare, all earlier service months must have bills generated;
 otherwise the edit returns 409 naming the first missing month. This prevents an

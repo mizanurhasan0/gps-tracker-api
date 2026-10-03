@@ -21,6 +21,7 @@ export interface Bill {
   subscriptionId: string;
   month: string;
   amount: number;
+  creditApplied: number;
   status: 'UNPAID' | 'PAID' | 'WAIVED';
   createdAt: string;
   paidAt: string | null;
@@ -35,6 +36,7 @@ export interface PaymentSubmission extends PaymentSubmissionDto {
   note: string;
   createdAt: string;
   reviewedAt: string | null;
+  creditApplied: number;
 }
 export interface PaymentAccount {
   method: string;
@@ -105,14 +107,74 @@ export class PaymentsService {
         guardianPhone: string;
         month: string;
         studentName: string;
+        billAmount: number;
       }
     >(
-      `SELECT p.*,u.name "guardianName",u.phone "guardianPhone",b.month,s."studentName",s."studentId",s."shiftId"
+      `SELECT p.*,u.name "guardianName",u.phone "guardianPhone",b.month,b.amount "billAmount",s."studentName",s."studentId",s."shiftId"
       FROM payment_submissions p JOIN users u ON u.id = p."guardianId" JOIN bills b ON b.id = p."billId"
       JOIN subscriptions s ON s.id = b."subscriptionId"
       WHERE ($1::text = 'ADMIN' OR p."guardianId" = $2) ORDER BY p."createdAt" DESC`,
       user.role,
       user.id,
+    );
+  }
+
+  async credit(user: User) {
+    const account = await this.db.get<{ balance: number }>(
+      'SELECT balance FROM guardian_credit_accounts WHERE "guardianId"=$1',
+      user.id,
+    );
+    const entries = await this.db.all<{
+      id: string;
+      billId: string;
+      submissionId: string;
+      kind: string;
+      amount: number;
+      createdAt: string;
+      month: string;
+      studentName: string;
+    }>(
+      `SELECT e.*, b.month, s."studentName" FROM guardian_credit_entries e
+       JOIN bills b ON b.id=e."billId"
+       JOIN subscriptions s ON s.id=b."subscriptionId"
+       WHERE e."guardianId"=$1 ORDER BY e."createdAt" DESC, e.id DESC LIMIT 50`,
+      user.id,
+    );
+    return { balance: account?.balance ?? 0, entries };
+  }
+
+  private async changeCredit(
+    guardianId: string,
+    billId: string,
+    submissionId: string,
+    kind: 'RESERVED' | 'RETURNED' | 'OVERPAYMENT' | 'CREDIT_PAYMENT',
+    amount: number,
+  ) {
+    if (!amount) return;
+    await this.db.run(
+      `INSERT INTO guardian_credit_accounts("guardianId",balance) VALUES($1,0)
+       ON CONFLICT("guardianId") DO NOTHING`,
+      guardianId,
+    );
+    const result = await this.db.run(
+      `UPDATE guardian_credit_accounts SET balance=balance+$1
+       WHERE "guardianId"=$2 AND balance+$3>=0`,
+      amount,
+      guardianId,
+      amount,
+    );
+    if (!result.rowCount)
+      throw new ConflictException('Available advance balance is insufficient. Refresh and try again');
+    await this.db.run(
+      `INSERT INTO guardian_credit_entries(id,"guardianId","billId","submissionId",kind,amount,"createdAt")
+       VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      randomUUID(),
+      guardianId,
+      billId,
+      submissionId,
+      kind,
+      amount,
+      new Date().toISOString(),
     );
   }
 
@@ -173,16 +235,17 @@ export class PaymentsService {
     return this.db
       .transaction(async () => {
         const bill = await this.db.get<Bill>(
-          `SELECT * FROM bills WHERE id = $1 AND "guardianId" = $2`,
+          `SELECT * FROM bills WHERE id = $1 AND "guardianId" = $2 FOR UPDATE`,
           input.billId,
           user.id,
         );
         if (!bill) throw new NotFoundException('Bill not found');
         if (bill.status === 'PAID') throw new ConflictException('This bill is already paid');
         if (bill.status === 'WAIVED') throw new ConflictException('This bill has been waived');
-        if (bill.amount !== input.amount)
+        const creditApplied = input.creditApplied ?? 0;
+        if (creditApplied >= bill.amount || input.amount + creditApplied < bill.amount)
           throw new BadRequestException(
-            'Send the full bill amount. Partial payments are not supported yet',
+            'Payment and applied advance must cover the full bill amount',
           );
         const account = await this.db.get<PaymentAccount>(
           `SELECT * FROM payment_accounts WHERE method = $1`,
@@ -222,8 +285,8 @@ export class PaymentsService {
         const id = randomUUID();
         await this.db.run(
           `INSERT INTO payment_submissions
-        (id,"billId","guardianId",method,"recipientNumber","senderNumber","transactionId",amount,status,"createdAt","methodName","evidenceImageUrl","transactionInfo")
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$12)`,
+        (id,"billId","guardianId",method,"recipientNumber","senderNumber","transactionId",amount,status,"createdAt","methodName","evidenceImageUrl","transactionInfo","creditApplied")
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$12,$13)`,
           id,
           bill.id,
           user.id,
@@ -236,7 +299,9 @@ export class PaymentsService {
           account.name,
           input.evidenceImageUrl ?? '',
           input.transactionInfo ?? '',
+          creditApplied,
         );
+        await this.changeCredit(user.id, bill.id, id, 'RESERVED', -creditApplied);
         await this.notifications.admins(
           'Payment needs verification',
           `${user.name} submitted a ${account.name} payment for ${bill.month}.`,
@@ -258,6 +323,47 @@ export class PaymentsService {
         }
         throw error;
       });
+  }
+
+  async payWithCredit(user: User, billId: string): Promise<PaymentSubmission> {
+    return this.db.transaction(async () => {
+      const bill = await this.db.get<Bill>(
+        `SELECT * FROM bills WHERE id=$1 AND "guardianId"=$2 FOR UPDATE`,
+        billId,
+        user.id,
+      );
+      if (!bill) throw new NotFoundException('Bill not found');
+      if (bill.status !== 'UNPAID') throw new ConflictException('This bill is no longer unpaid');
+      if (await this.db.get(
+        `SELECT id FROM payment_submissions WHERE "billId"=$1 AND status='PENDING'`,
+        billId,
+      )) throw new ConflictException('This bill already has a submission awaiting review');
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      await this.db.run(
+        `INSERT INTO payment_submissions
+         (id,"billId","guardianId",method,"recipientNumber","senderNumber","transactionId",amount,status,"createdAt","methodName","creditApplied","reviewedAt")
+         VALUES($1,$2,$3,'CREDIT','','','',0,'APPROVED',$4,'Advance balance',$5,$4)`,
+        id,
+        bill.id,
+        user.id,
+        now,
+        bill.amount,
+      );
+      await this.changeCredit(user.id, bill.id, id, 'CREDIT_PAYMENT', -bill.amount);
+      await this.db.run(
+        `UPDATE bills SET status='PAID',"paidAt"=$1,"creditApplied"=$2 WHERE id=$3`,
+        now,
+        bill.amount,
+        bill.id,
+      );
+      await this.notifications.create(user.id, 'Payment completed',
+        'Your advance balance paid this monthly bill.', id);
+      await this.notifications.audit(user.id, 'BILL_PAID_WITH_CREDIT', id);
+      return (await this.db.get<PaymentSubmission>(
+        'SELECT * FROM payment_submissions WHERE id=$1', id,
+      ))!;
+    });
   }
 
   private requireProof(input: PaymentEvidenceDto) {
@@ -309,11 +415,20 @@ export class PaymentsService {
       const now = new Date().toISOString();
       if (input.decision === 'APPROVED') {
         const result = await this.db.run(
-          `UPDATE bills SET status = 'PAID', "paidAt" = $1 WHERE id = $2 AND status = 'UNPAID'`,
+          `UPDATE bills SET status = 'PAID', "paidAt" = $1, "creditApplied"=$3 WHERE id = $2 AND status = 'UNPAID'`,
           now,
           submission.billId,
+          submission.creditApplied,
         );
         if (!result.rowCount) throw new ConflictException('This bill is already paid');
+        const bill = (await this.db.get<Bill>('SELECT * FROM bills WHERE id=$1', submission.billId))!;
+        const extra = submission.amount + submission.creditApplied - bill.amount;
+        if (extra > 0)
+          await this.changeCredit(submission.guardianId, bill.id, id, 'OVERPAYMENT', extra);
+      } else if (submission.creditApplied) {
+        await this.changeCredit(
+          submission.guardianId, submission.billId, id, 'RETURNED', submission.creditApplied,
+        );
       }
       await this.db.run(
         `UPDATE payment_submissions SET status = $1, note = $2, "reviewedBy" = $3, "reviewedAt" = $4 WHERE id = $5`,

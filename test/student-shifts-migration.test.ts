@@ -47,7 +47,10 @@ test('version 4 preserves renamed profiles, existing enrollment, bills, attendan
   assert.equal(profile.roll, '42');
   assert.equal((await db.get('SELECT "studentId" FROM service_requests WHERE id=$1', ids.request)).studentId, profile.id);
   assert.equal((await db.get('SELECT "pickupAddress" FROM students WHERE id=$1', ids.service)).pickupAddress, 'Existing pickup');
-  assert.deepEqual(await db.get('SELECT * FROM bills WHERE id=$1', ids.bill), beforeBill);
+  assert.deepEqual(await db.get('SELECT * FROM bills WHERE id=$1', ids.bill), {
+    ...beforeBill,
+    creditApplied: 0,
+  });
   assert.deepEqual(await db.get('SELECT * FROM attendance WHERE id=$1', ids.attendance), beforeAttendance);
   assert.deepEqual((await db.get('SELECT data FROM business_settings WHERE id=1')).data.operatingDays, [0, 1, 2, 3, 4, 5, 6]);
   await db.onModuleInit();

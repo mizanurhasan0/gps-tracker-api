@@ -1166,7 +1166,19 @@ export class ManagementService {
         month,
       );
       const fare = await this.db.get<{ amount: number }>(
-        `SELECT COALESCE(sum(amount),0)::float8 amount FROM bills WHERE status='PAID' AND to_char("paidAt"::timestamptz AT TIME ZONE 'Asia/Dhaka','YYYY-MM')=$1`,
+        `SELECT COALESCE(sum(cash.amount),0)::float8 amount FROM (
+           SELECT p.amount, COALESCE(p."reviewedAt", b."paidAt") "receivedAt"
+           FROM payment_submissions p JOIN bills b ON b.id=p."billId"
+           WHERE p.status='APPROVED'
+           UNION ALL
+           SELECT b.amount, b."paidAt" "receivedAt" FROM bills b
+           WHERE b.status='PAID' AND NOT EXISTS (
+             SELECT 1 FROM payment_submissions p
+             WHERE p."billId"=b.id AND p.status='APPROVED'
+           )
+         ) cash
+         WHERE cash."receivedAt" IS NOT NULL
+         AND to_char(cash."receivedAt"::timestamptz AT TIME ZONE 'Asia/Dhaka','YYYY-MM')=$1`,
         month,
       );
       const sum = (type: string) =>

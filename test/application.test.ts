@@ -663,6 +663,86 @@ test(
           0,
         );
       });
+      await t.test('carries verified overpayments and safely applies advance credit', async () => {
+        const credit = () => request<{
+          balance: number;
+          entries: { kind: string; amount: number }[];
+        }>('/payments/credit', guardian.token);
+        assert.equal((await credit()).balance, 0);
+        assert.equal((await request<{ balance: number }>('/payments/credit', other.token)).balance, 0);
+        const secondBill = (await request<Bill[]>('/payments/monthly', guardian.token))
+          .find(item => item.status === 'UNPAID')!;
+        const overpayment = await request<PaymentSubmission>(
+          '/payments/submissions', guardian.token,
+          { ...paymentInput, billId: secondBill.id, recipientNumber: '01700000009',
+            transactionId: 'ADVANCE-OVERPAY', amount: secondBill.amount * 3 }, 'POST', 201,
+        );
+        assert.equal((await credit()).balance, 0, 'pending transfers do not create credit');
+        await request(`/admin/payments/${overpayment.id}/decision`, admin.token,
+          { decision: 'APPROVED' }, 'PATCH');
+        assert.equal((await credit()).balance, secondBill.amount * 2);
+        assert.equal((await credit()).entries[0].kind, 'OVERPAYMENT');
+
+        const createBill = async (studentName: string) => {
+          const serviceRequest = await request<Identified>(
+            '/requests/guardian/new', guardian.token,
+            { studentName, routeId: route.id, stopId: route.stops[0].id }, 'POST', 201,
+          );
+          await request(`/admin/requests/${serviceRequest.id}/decision`, admin.token,
+            { decision: 'APPROVED' }, 'PATCH');
+          await request('/admin/bills/generate', admin.token, { month }, 'POST', 201);
+          return (await request<Array<Bill & { studentName: string }>>(
+            '/payments/monthly', guardian.token,
+          )).find(item => item.studentName === studentName)!;
+        };
+        const thirdBill = await createBill('Student Three');
+        const half = Math.floor(thirdBill.amount / 2);
+        await request('/payments/submissions', guardian.token,
+          { ...paymentInput, billId: thirdBill.id, recipientNumber: '01700000009',
+            transactionId: 'ADVANCE-TOO-SMALL', amount: thirdBill.amount - half - 1,
+            creditApplied: half }, 'POST', 400);
+        const pending = await request<PaymentSubmission>(
+          '/payments/submissions', guardian.token,
+          { ...paymentInput, billId: thirdBill.id, recipientNumber: '01700000009',
+            transactionId: 'ADVANCE-REJECT', amount: thirdBill.amount - half,
+            creditApplied: half }, 'POST', 201,
+        );
+        assert.equal((await credit()).balance, secondBill.amount * 2 - half);
+        await request(`/admin/payments/${pending.id}/decision`, admin.token,
+          { decision: 'REJECTED', note: 'No matching transfer' }, 'PATCH');
+        assert.equal((await credit()).balance, secondBill.amount * 2,
+          'rejection returns reserved credit');
+        const corrected = await request<PaymentSubmission>(
+          '/payments/submissions', guardian.token,
+          { ...paymentInput, billId: thirdBill.id, recipientNumber: '01700000009',
+            transactionId: 'ADVANCE-CORRECT', amount: thirdBill.amount - half,
+            creditApplied: half }, 'POST', 201,
+        );
+        await request(`/admin/payments/${corrected.id}/decision`, admin.token,
+          { decision: 'APPROVED' }, 'PATCH');
+        assert.equal((await credit()).balance, secondBill.amount * 2 - half);
+        assert.equal((await request<Bill[]>('/payments/monthly', guardian.token))
+          .find(item => item.id === thirdBill.id)?.creditApplied, half);
+
+        const fourthBill = await createBill('Student Four');
+        await request(`/payments/bills/${fourthBill.id}/pay-with-credit`, other.token,
+          {}, 'POST', 404);
+        const fromCredit = await request<PaymentSubmission>(
+          `/payments/bills/${fourthBill.id}/pay-with-credit`, guardian.token, {}, 'POST', 201,
+        );
+        assert.equal(fromCredit.status, 'APPROVED');
+        assert.equal(fromCredit.amount, 0);
+        assert.equal(fromCredit.creditApplied, fourthBill.amount);
+        assert.equal((await credit()).balance, secondBill.amount * 2 - half - fourthBill.amount);
+        const report = await request<{ cashflow: { fareReceived: number } }>(
+          `/admin/reports?month=${month}`, admin.token,
+        );
+        assert.equal(report.cashflow.fareReceived,
+          bill.amount + secondBill.amount * 3 + thirdBill.amount - half,
+          'using advance on a later bill must not count as another cash receipt');
+        await request(`/payments/bills/${fourthBill.id}/pay-with-credit`, guardian.token,
+          {}, 'POST', 409);
+      });
       await t.test('complaints resolve and stop approvals revoke live socket access', async () => {
         const complaint = await request<Identified>(
           '/complaints',
@@ -786,7 +866,7 @@ test(
         });
         assert.equal(
           (await request<Bill[]>('/payments/monthly', guardian.token)).length,
-          2,
+          4,
           'billing history survives a stop',
         );
         await request('/auth/logout', guardian.token, undefined, 'POST', 204);
@@ -815,7 +895,7 @@ test(
               )
             ).total,
           ),
-          1,
+          3,
         );
       });
     } finally {

@@ -11,6 +11,7 @@ import { adminRecoverySchema } from './admin-recovery.schema';
 import { studentArchiveSchema } from './student-archive.schema';
 import { serviceSettlementsSchema } from './service-settlements.schema';
 import { studentProfileDetailsSchema } from './student-profile-details.schema';
+import { guardianCreditSchema } from './guardian-credit.schema';
 
 /** Append migrations; existing versions must retain their upgrade semantics. */
 export const migrations = [
@@ -27,4 +28,5 @@ export const migrations = [
   [11, studentArchiveSchema],
   [12, serviceSettlementsSchema],
   [13, studentProfileDetailsSchema],
+  [14, guardianCreditSchema],
 ] as const;

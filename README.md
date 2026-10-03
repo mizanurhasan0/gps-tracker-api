@@ -79,7 +79,9 @@ All endpoints below except registration/login require
 | PUT | `/admin/payment-accounts/:method` | Admin: `{name?,number,instructions,imageUrl?}`; stable method key (letters, digits, `_`, `-`, max 80) |
 | POST | `/admin/bills/generate` | `{month:"YYYY-MM"}`; idempotent; no future month |
 | GET | `/payments/monthly?month=YYYY-MM` | Own bills, or all for admin; optional month |
+| GET | `/payments/credit` | Guardian's available advance balance and newest 50 credit journal entries |
 | POST | `/payments/submissions` | Guardian proof details; example below |
+| POST | `/payments/bills/:id/pay-with-credit` | Guardian pays an own unpaid bill immediately when available advance covers it; no body required |
 | PATCH | `/payments/submissions/:id/evidence` | Owning guardian, PENDING only: `{transactionId?,evidenceImageUrl?,transactionInfo?}` |
 | GET | `/payments/submissions` | Own history / admin payment review queue |
 | PATCH | `/admin/payments/:id/decision` | Admin approve/reject; rejection needs note |
@@ -100,13 +102,21 @@ Example manual payment body (**amounts are integer poisha**, not taka):
   "senderNumber": "01700000002",
   "recipientNumber": "01700000001",
   "transactionId": "ABC1234567",
-  "amount": 150000
+  "amount": 150000,
+  "creditApplied": 0
 }
 ```
 
 The receiving number must be a current or previously configured admin account.
 This preserves the actual destination if settings change after a guardian sends
-money. The exact bill amount is required. Non-empty transaction IDs are trimmed and compared case-insensitively for uniqueness within each payment method across pending/approved submissions. Rejected
+money. `amount` is the actual external transfer; it may exceed the bill. Optional
+`creditApplied` reserves available advance toward this bill. Their sum must cover
+the bill, and an external submission must send at least one poisha. Advance is
+reserved when submitted and returned if rejected. After approval, any amount
+above the bill is credited to the guardian account. A bill fully covered by
+advance can use the credit-only endpoint without an external transfer or admin
+review. All changes are atomic and recorded in `guardian_credit_entries`.
+Non-empty transaction IDs are trimmed and compared case-insensitively for uniqueness within each payment method across pending/approved submissions. Rejected
 proof stays in history and may be corrected and resubmitted. Only one pending
 submission is allowed per bill. A paid bill cannot be paid again through this API.
 
@@ -131,7 +141,8 @@ are performed by the server.
 - Stop approval takes effect immediately. Existing bills/receipts remain visible.
 - Bill generation is an explicit admin action. Fees are captured on subscription
   approval. A subscription is billed its full fee for months intersecting its
-  active dates (Asia/Dhaka). No proration, refund or partial payment logic.
+  active dates (Asia/Dhaka). There is no proration or external refund; an
+  external payment plus reserved advance must settle the entire bill.
 - Notifications are stored transactionally and fetched by the app every 20 seconds
   while foregrounded, on resume and pull-to-refresh. FCM background push is not
   configured.
