@@ -6,7 +6,9 @@ import { appConfig } from '../config/app.config';
 import type { DeviceLocation } from '../locations/location.types';
 export const LOCATION_UPDATE_EVENT = 'location:update';
 const AUTHORIZATION_BATCH_SIZE = 250;
-@WebSocketGateway(appConfig.socket.port, {
+@WebSocketGateway({
+  port: appConfig.socket.port,
+  host: appConfig.socket.host,
   cors: { origin: appConfig.cors.origin },
 })
 export class RealtimeGateway implements OnGatewayInit {

@@ -26,6 +26,7 @@ import {
   CreateStudentDto,
   ScheduleDto,
   SettingsDto,
+  StudentListQueryDto,
   StopStudentServiceDto,
   UpdateBannerDto,
   UpdateDriverDto,
@@ -39,6 +40,12 @@ export class ManagementController {
   constructor(private readonly service: ManagementService) {}
   @Get('management/overview') overview(@Req() req: AuthRequest) {
     return this.service.overview(req.user);
+  }
+  @Roles('ADMIN') @Get('admin/students') listStudents(
+    @Req() req: AuthRequest,
+    @Query() query: StudentListQueryDto,
+  ) {
+    return this.service.listStudents(req.user, query);
   }
   @Roles('ADMIN') @Post('admin/students') student(
     @Req() req: AuthRequest,

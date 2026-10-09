@@ -8,6 +8,7 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | Method | Endpoint | Body / behavior |
 |---|---|---|
 | GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,banners,requests,settings,schedules}`; guardians receive published image banners, while admins also receive hidden banners for management |
+| GET | `/admin/students?page=1&pageSize=10&status=ALL&search=&vehicleId=` | Admin student page: `{items,page,pageSize,total,totalPages,counts}`. `status` accepts `ALL`, `ACTIVE`, `ABSENT`, `LEAVE`, or `ARCHIVED`; search and vehicle filters apply before paging. Counts are canonical student profiles and use the Asia/Dhaka attendance date. |
 | POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
 | PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId and legacy monthlyAmount; active services must use the stop action below |
 | PATCH | `/admin/students/:id/stop` | `{stopDate,finalMonthlyFee,reason?}`; non-destructively stops one shift and settles its current-month bill |

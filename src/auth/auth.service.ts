@@ -13,6 +13,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import { promisify } from 'node:util';
+import { appConfig } from '../config/app.config';
 import { DatabaseService } from '../database/database.service';
 import { LoginDto, RegisterDto, UpdateProfileDto } from './auth.dto';
 import { User } from './auth.types';
@@ -34,9 +35,16 @@ export class AuthService implements OnModuleInit {
     const phone = process.env.ADMIN_PHONE;
     const password = process.env.ADMIN_PASSWORD;
     if (!phone && !password) return;
-    if (!phone || !/^01[3-9]\d{8}$/.test(phone) || !password || password.length < 12) {
+    const minimumPasswordLength = appConfig.auth.allowShortPasswords ? 1 : 12;
+    if (
+      !phone ||
+      !/^01[3-9]\d{8}$/.test(phone) ||
+      !password ||
+      password.length < minimumPasswordLength
+    ) {
       throw new Error(
-        'Set ADMIN_PHONE to a Bangladesh mobile number and ADMIN_PASSWORD to at least 12 characters',
+        'Set ADMIN_PHONE to a Bangladesh mobile number and ' +
+          `ADMIN_PASSWORD to at least ${minimumPasswordLength} character${minimumPasswordLength === 1 ? '' : 's'}`,
       );
     }
     const hash = await hashPassword(password);

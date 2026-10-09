@@ -20,7 +20,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  await app.listen(appConfig.rest.port);
+  await app.listen(appConfig.rest.port, appConfig.rest.host);
 
   const { publicHost, port: tcpPort } = appConfig.tcp;
   logger.log(`REST API      http://${publicHost}:${appConfig.rest.port}`);

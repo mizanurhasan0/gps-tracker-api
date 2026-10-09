@@ -1,42 +1,6 @@
 # Local development only. Use scripts/local.sh so Compose reads .env.local, not .env.
 name: gps-tracker-dev
 services:
-  api:
-    build: .
-    init: true
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgresql://gps_tracker:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env.local}@postgres:5432/gps_tracker
-      ADMIN_PHONE: ${ADMIN_PHONE:?Set ADMIN_PHONE in .env.local}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env.local}
-      REST_PORT: 3000
-      SOCKET_PORT: 3001
-      TCP_HOST: 0.0.0.0
-      TCP_PORT: 5023
-      PUBLIC_HOST: 127.0.0.1
-      CORS_ORIGIN: '*'
-      ADMIN_RECOVERY_ENABLED: 'false'
-      BACKUP_ENABLED: 'false'
-      BACKUP_SCHEDULE_ENABLED: 'false'
-      TELEGRAM_ENABLED: 'false'
-    ports:
-      - "${LOCAL_BIND_HOST:-127.0.0.1}:${LOCAL_REST_PORT:-3000}:3000"
-      - "${LOCAL_BIND_HOST:-127.0.0.1}:${LOCAL_SOCKET_PORT:-3001}:3001"
-      - "127.0.0.1:${LOCAL_TCP_PORT:-5023}:5023"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      start_period: 30s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped

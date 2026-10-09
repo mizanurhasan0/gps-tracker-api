@@ -23,12 +23,12 @@ charges for each student journey on the same route.
 
 ## Start the transport service
 
-For local Docker development and one-command updates, see
-[Run the API locally with Docker](docs/LOCAL_DOCKER.md). Use
-`npm run local:update` (or `bash scripts/local.sh update` without host Node).
+For local development with PostgreSQL in Docker and the API running on the host,
+see [Run the API locally with Docker PostgreSQL](docs/LOCAL_DOCKER.md). Start the
+database with `npm run local:update`, then run `npm run start:dev` in a terminal.
 
-Requires **Node >=22.22.0** and PostgreSQL. Docker can run both services without
-installing Node or PM2 on the host; see the deployment guide.
+Local host development requires **Node >=22.22.0** and PostgreSQL. Docker runs
+the database locally; production Docker deployment is documented separately.
 
 ```sh
 npm ci
@@ -38,9 +38,15 @@ cp .env.example .env
 npm run start:dev
 ```
 
-`.env` is loaded automatically; already-exported environment variables take
-precedence. The admin is bootstrapped only when no admin exists. Guardians can
-self-register using a Bangladesh phone number and a password (8–128 characters).
+The API loads `.env.local` when it exists; otherwise it loads `.env`. Already-
+exported environment variables take precedence. For the local Docker PostgreSQL
+flow, `npm run local:update` creates `.env.local` and the API derives its database
+URL from those credentials. The admin is bootstrapped only when no admin exists.
+Guardians can self-register using a Bangladesh phone number and a password
+(8–128 characters). For local Docker PostgreSQL development only,
+`LOCAL_ALLOW_SHORT_PASSWORDS=true` in `.env.local` allows any non-empty
+password up to 128 characters; it has no effect when the production `.env` is
+loaded.
 Changing ADMIN_PASSWORD later does not reset an existing account's password.
 No default admin credentials are shipped. Optional owner-bound admin email recovery
 is documented in [admin recovery](docs/ADMIN_RECOVERY.md). It is disabled until
@@ -181,9 +187,10 @@ sockets or a Nest container.
 
 ## Configuration
 
-Copy `.env.example` to `.env`. `DATABASE_URL` is mandatory: startup fails if it is
-missing or PostgreSQL is unavailable. Schema migrations run automatically. Existing
-SQLite/JSON files are never imported automatically.
+For a normal setup, copy `.env.example` to `.env` and set `DATABASE_URL`.
+`DATABASE_URL` is mandatory when `.env.local` is absent: startup fails if it is
+missing or PostgreSQL is unavailable. Schema migrations run automatically.
+Existing SQLite/JSON files are never imported automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|

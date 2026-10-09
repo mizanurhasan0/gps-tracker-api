@@ -2,6 +2,14 @@ import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsBoolean, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateIf, ValidateNested } from 'class-validator';
 import { trim } from '../auth/auth.dto';
 
+export class StudentListQueryDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(1_000_000) page?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) pageSize?: number;
+  @IsOptional() @IsIn(['ALL', 'ACTIVE', 'ABSENT', 'LEAVE', 'ARCHIVED']) status?: string;
+  @IsOptional() @Transform(trim) @IsString() @MaxLength(120) search?: string;
+  @IsOptional() @IsUUID() vehicleId?: string;
+}
+
 export class StudentScheduleDto {
   @IsOptional() @Transform(trim) @IsString() @MinLength(1) @MaxLength(40) shiftId?: string;
   @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(7) @ArrayUnique() @IsInt({each:true}) @Min(0,{each:true}) @Max(6,{each:true}) operatingDays?: number[];

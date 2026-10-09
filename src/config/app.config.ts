@@ -1,7 +1,11 @@
 import { existsSync } from 'node:fs';
 import { readRecoveryConfig } from '../auth/recovery/recovery.config';
 
-if (existsSync('.env')) process.loadEnvFile('.env');
+// Local development runs PostgreSQL in Docker and the API on the host. Prefer
+// its private local credentials when present; otherwise keep the normal .env flow.
+const usingLocalEnv = existsSync('.env.local');
+const envFile = usingLocalEnv ? '.env.local' : '.env';
+if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 function readNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -37,6 +41,17 @@ function readBoolean(value: string | undefined, fallback: boolean, name: string)
 function readString(value: string | undefined, fallback: string): string {
   const trimmed = value?.trim();
   return trimmed ? trimmed : fallback;
+}
+
+function getDatabaseUrl(): string {
+  const configuredUrl = readString(process.env.DATABASE_URL, '');
+  if (configuredUrl || !usingLocalEnv) return configuredUrl;
+
+  const password = readString(process.env.APP_DB_PASSWORD, '');
+  if (!password) return '';
+
+  const port = readNumber(process.env.LOCAL_POSTGRES_PORT, 55432);
+  return `postgresql://gps_tracker:${encodeURIComponent(password)}@127.0.0.1:${port}/gps_tracker`;
 }
 
 function readList(value: string | undefined): string[] {
@@ -100,18 +115,34 @@ function readTelegramConfig() {
 
 export const appConfig = {
   rest: {
-    port: readNumber(process.env.REST_PORT, 3000),
+    host: usingLocalEnv
+      ? readString(process.env.LOCAL_BIND_HOST, '127.0.0.1')
+      : readString(process.env.REST_HOST, '0.0.0.0'),
+    port: readNumber(process.env.REST_PORT ?? process.env.LOCAL_REST_PORT, 3000),
   },
   socket: {
-    port: readNumber(process.env.SOCKET_PORT, 3001),
+    host: usingLocalEnv
+      ? readString(process.env.LOCAL_BIND_HOST, '127.0.0.1')
+      : readString(process.env.SOCKET_HOST, '0.0.0.0'),
+    port: readNumber(process.env.SOCKET_PORT ?? process.env.LOCAL_SOCKET_PORT, 3001),
   },
   tcp: {
-    host: readString(process.env.TCP_HOST, '0.0.0.0'),
-    port: readNumber(process.env.TCP_PORT, 5023),
+    host: readString(process.env.TCP_HOST, usingLocalEnv ? '127.0.0.1' : '0.0.0.0'),
+    port: readNumber(process.env.TCP_PORT ?? process.env.LOCAL_TCP_PORT, 5023),
     publicHost: readString(process.env.PUBLIC_HOST, '127.0.0.1'),
   },
   cors: {
     origin: readString(process.env.CORS_ORIGIN, '*'),
+  },
+  auth: {
+    // Short passwords are an explicit local-development convenience. This can
+    // never be enabled from the production .env file.
+    allowShortPasswords: usingLocalEnv &&
+      readBoolean(
+        process.env.LOCAL_ALLOW_SHORT_PASSWORDS,
+        false,
+        'LOCAL_ALLOW_SHORT_PASSWORDS',
+      ),
   },
   devices: {
     /** A device is considered online if seen within this window */
@@ -120,7 +151,7 @@ export const appConfig = {
     allowedImeis: readList(process.env.ALLOWED_IMEIS),
   },
   database: {
-    url: readString(process.env.DATABASE_URL, ''),
+    url: getDatabaseUrl(),
   },
   telegram: readTelegramConfig(),
   recovery: readRecoveryConfig(),

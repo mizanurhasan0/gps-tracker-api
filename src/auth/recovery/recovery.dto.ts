@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import { IsEmail, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { appConfig } from '../../config/app.config';
 
 export class RecoveryRequestDto {
   @Transform(({ value }: { value: unknown }) =>
@@ -13,6 +14,12 @@ export class RecoveryRequestDto {
 export class RecoveryConfirmDto extends RecoveryRequestDto {
   @IsUUID('4') requestId!: string;
   @IsString() @Matches(/^\d{8}$/) otp!: string;
-  @IsString() @MinLength(12) @MaxLength(128) newPassword!: string;
-  @IsString() @MinLength(12) @MaxLength(128) confirmPassword!: string;
+  @IsString()
+  @MinLength(appConfig.auth.allowShortPasswords ? 1 : 12)
+  @MaxLength(128)
+  newPassword!: string;
+  @IsString()
+  @MinLength(appConfig.auth.allowShortPasswords ? 1 : 12)
+  @MaxLength(128)
+  confirmPassword!: string;
 }

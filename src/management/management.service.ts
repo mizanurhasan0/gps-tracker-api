@@ -9,6 +9,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { User } from '../auth/auth.types';
 import { hashPassword } from '../auth/password';
+import { appConfig } from '../config/app.config';
 import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { DecisionDto } from '../payments/payments.dto';
@@ -35,6 +36,7 @@ import {
   CreateStudentDto,
   ScheduleDto,
   SettingsDto,
+  StudentListQueryDto,
   StopStudentServiceDto,
   UpdateBannerDto,
   UpdateDriverDto,
@@ -55,6 +57,48 @@ const profileFields = [
 ] as const;
 type Row = Record<string, any>;
 const now = () => new Date().toISOString();
+
+const studentListCte = `WITH enrollment_rows AS (
+  SELECT p.id,p."pickupAddress",p."dropAddress",c."studentCode",c."className",c.roll,c."dateOfBirth",c."bloodGroup",c."photoUrl",c."emergencyContact",c."archivedAt",c."archivedBy",
+    s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",s."stoppedAt",s."stoppedOn",s."stopReason",s."finalMonthlyFee",
+    u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
+    v."driverName" "driverName",v."driverPhone" "driverPhone",
+    EXISTS (
+      SELECT 1 FROM subscriptions attendance_service
+      JOIN attendance a ON a."studentId"=attendance_service.id
+      WHERE attendance_service."studentId"=s."studentId" AND a.date=$1 AND a.status='ABSENT'
+    ) "hasAbsent",
+    EXISTS (
+      SELECT 1 FROM subscriptions attendance_service
+      JOIN attendance a ON a."studentId"=attendance_service.id
+      WHERE attendance_service."studentId"=s."studentId" AND a.date=$1 AND a.status='LEAVE'
+    ) "hasLeave",
+    ROW_NUMBER() OVER (
+      PARTITION BY s."studentId"
+      ORDER BY CASE WHEN s.status='ACTIVE' THEN 0 ELSE 1 END,
+        CASE WHEN s.status='ACTIVE' THEN s.id END ASC NULLS LAST,
+        CASE WHEN s.status<>'ACTIVE' THEN s.id END DESC NULLS LAST
+    ) "profileRank"
+  FROM students p
+  JOIN subscriptions s ON s.id=p.id
+  JOIN student_profiles c ON c.id=s."studentId"
+  JOIN users u ON u.id=s."guardianId"
+  JOIN routes r ON r.id=s."routeId"
+  JOIN stops t ON t.id=s."stopId"
+  LEFT JOIN stops d ON d.id=s."dropoffStopId"
+  JOIN vehicles v ON v.id=r."vehicleId"
+), canonical_students AS (
+  SELECT * FROM enrollment_rows WHERE "profileRank"=1
+)`;
+
+const studentCategoryCondition = `(
+  ($4::text='ALL' AND "archivedAt" IS NULL) OR
+  ($4::text='ACTIVE' AND "archivedAt" IS NULL AND status='ACTIVE') OR
+  ($4::text='ABSENT' AND "archivedAt" IS NULL AND "hasAbsent") OR
+  ($4::text='LEAVE' AND "archivedAt" IS NULL AND "hasLeave") OR
+  ($4::text='ARCHIVED' AND "archivedAt" IS NOT NULL)
+)`;
+const studentListFields = `id,"studentId","shiftId","operatingDays","subscriptionId","guardianId","studentName","studentCode","className",roll,"dateOfBirth","bloodGroup","photoUrl","guardianName","guardianPhone","pickupAddress","dropAddress","emergencyContact","routeId","routeName","stopId","stopName","dropoffStopId","dropoffStopName","vehicleId","vehicleName","driverName","driverPhone","monthlyAmount",status,"startedAt","stoppedAt","stoppedOn","stopReason","finalMonthlyFee","archivedAt","archivedBy","hasAbsent","hasLeave"`;
 
 @Injectable()
 export class ManagementService {
@@ -153,6 +197,64 @@ export class ManagementService {
       id ?? null,
       archived,
     );
+  }
+
+  async listStudents(_actor: User, input: StudentListQueryDto) {
+    const pageSize = input.pageSize ?? 10;
+    const requestedPage = input.page ?? 1;
+    const status = input.status ?? 'ALL';
+    const search = input.search?.trim() ?? '';
+    const vehicleId = input.vehicleId ?? null;
+    const today = dhakaDate();
+    const countRow = await this.db.get<Row>(
+      `${studentListCte}
+      SELECT
+        COUNT(*) FILTER (WHERE ${studentCategoryCondition}
+          AND ($2::text='' OR LOWER(CONCAT_WS(' ',"studentName","studentCode","guardianName","routeName")) LIKE '%' || LOWER($2) || '%')
+          AND ($3::text IS NULL OR "vehicleId"=$3))::int total,
+        COUNT(*) FILTER (WHERE "archivedAt" IS NULL)::int "allCount",
+        COUNT(*) FILTER (WHERE "archivedAt" IS NULL AND status='ACTIVE')::int "activeCount",
+        COUNT(*) FILTER (WHERE "archivedAt" IS NULL AND "hasAbsent")::int "absentCount",
+        COUNT(*) FILTER (WHERE "archivedAt" IS NULL AND "hasLeave")::int "leaveCount",
+        COUNT(*) FILTER (WHERE "archivedAt" IS NOT NULL)::int "archivedCount"
+      FROM canonical_students`,
+      today,
+      search,
+      vehicleId,
+      status,
+    );
+    const total = Number(countRow?.total ?? 0);
+    const totalPages = Math.ceil(total / pageSize);
+    const page = totalPages === 0 ? 1 : Math.min(requestedPage, totalPages);
+    const items = await this.db.all<Row>(
+      `${studentListCte}
+      SELECT ${studentListFields} FROM canonical_students
+      WHERE ${studentCategoryCondition}
+        AND ($2::text='' OR LOWER(CONCAT_WS(' ',"studentName","studentCode","guardianName","routeName")) LIKE '%' || LOWER($2) || '%')
+        AND ($3::text IS NULL OR "vehicleId"=$3)
+      ORDER BY "studentName",id
+      LIMIT $5 OFFSET $6`,
+      today,
+      search,
+      vehicleId,
+      status,
+      pageSize,
+      (page - 1) * pageSize,
+    );
+    return {
+      items,
+      page,
+      pageSize,
+      total,
+      totalPages,
+      counts: {
+        all: Number(countRow?.allCount ?? 0),
+        active: Number(countRow?.activeCount ?? 0),
+        absent: Number(countRow?.absentCount ?? 0),
+        leave: Number(countRow?.leaveCount ?? 0),
+        archived: Number(countRow?.archivedCount ?? 0),
+      },
+    };
   }
 
   archivedStudents(actor: User) {
@@ -440,7 +542,9 @@ export class ManagementService {
       if (!existing && !guardianPhone) throw new BadRequestException('Guardian phone is required');
       let guardianAccountCreated = false;
       if (!guardian) {
-        const passwordHash = await hashPassword('password');
+        const passwordHash = await hashPassword(
+          appConfig.auth.allowShortPasswords ? 'pass' : 'password',
+        );
         // The unique phone constraint and serializable transaction retry prevent
         // concurrent enrollments from creating or overwriting duplicate accounts.
         guardian = await this.db.get<{ id: string; role: string }>(

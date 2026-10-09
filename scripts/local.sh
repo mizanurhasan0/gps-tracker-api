@@ -7,10 +7,10 @@ usage() {
   cat <<'HELP'
 Usage: bash scripts/local.sh [update|stop|status|logs|config]
 
-  update  Create .env.local on first use, rebuild the API and start both services
-  stop    Stop services while keeping the local PostgreSQL volume
+  update  Create .env.local on first use and start/update PostgreSQL only
+  stop    Stop PostgreSQL while keeping its local volume
   status  Show container status
-  logs    Follow API logs
+  logs    Follow PostgreSQL logs
   config  Validate the resolved Compose configuration
 
 The default action is update. All commands use compose.local.yml and .env.local.
@@ -56,8 +56,10 @@ POSTGRES_PASSWORD=$postgres_password
 APP_DB_PASSWORD=$app_password
 ADMIN_PHONE=01700000000
 ADMIN_PASSWORD=$admin_password
+# Local API accepts any non-empty password when this file is loaded.
+LOCAL_ALLOW_SHORT_PASSWORDS=true
 
-# Host port bindings. Keep 3000/3001 paired for the Android app.
+# Host API bind/ports. Keep 3000/3001 paired for the Android app.
 LOCAL_BIND_HOST=127.0.0.1
 LOCAL_REST_PORT=3000
 LOCAL_SOCKET_PORT=3001
@@ -84,19 +86,21 @@ if (( (8#$file_mode & 077) != 0 )); then
 fi
 # Compose gives exported shell variables precedence over --env-file. Keep this
 # project's credentials and port settings authoritative even in a VPS shell.
-unset APP_DB_PASSWORD POSTGRES_PASSWORD ADMIN_PHONE ADMIN_PASSWORD
+unset APP_DB_PASSWORD POSTGRES_PASSWORD ADMIN_PHONE ADMIN_PASSWORD LOCAL_ALLOW_SHORT_PASSWORDS
 unset LOCAL_BIND_HOST LOCAL_REST_PORT LOCAL_SOCKET_PORT LOCAL_TCP_PORT LOCAL_POSTGRES_PORT
 compose=(docker compose --ansi never --project-name gps-tracker-dev --env-file .env.local -f compose.local.yml)
 "${compose[@]}" config --quiet
 
 case "$action" in
   update)
-    "${compose[@]}" up -d --build --wait --wait-timeout 180
+    # Remove the API container from older versions of this local Compose stack.
+    # Compose only removes that orphan container; the PostgreSQL volume is kept.
+    "${compose[@]}" up -d --remove-orphans --wait --wait-timeout 180 postgres
     "${compose[@]}" ps
-    echo 'Local API is healthy. Check the configured LOCAL_BIND_HOST and LOCAL_REST_PORT for its URL.'
+    echo 'PostgreSQL is healthy. Start the API on this machine with: npm run start:dev'
     ;;
   stop) "${compose[@]}" down ;;
   status) "${compose[@]}" ps ;;
-  logs) "${compose[@]}" logs -f --tail=100 api ;;
+  logs) "${compose[@]}" logs -f --tail=100 postgres ;;
   config) echo 'Local Compose configuration is valid.' ;;
 esac
