@@ -14,6 +14,7 @@
     "local:logs": "bash scripts/local.sh logs",
     "local:config": "bash scripts/local.sh config",
     "seed:local:students": "node scripts/seed-local-students.cjs",
+    "seed:local:dashboard": "node scripts/seed-local-dashboard.cjs",
     "test": "npm run build && node scripts/run-tests.cjs",
     "typecheck": "tsc --noEmit",
     "test:unit": "npm run build && node scripts/run-tests.cjs --unit",

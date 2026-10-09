@@ -54,6 +54,12 @@ guardians with `npm run seed:local:students`. Each guardian's local password is
 `pass` by default. Repeating the command skips students already created by
 this seed.
 
+After seeding students, run `npm run seed:local:dashboard` to add 30 demo
+vehicles with routes and drivers, plus current-month bills for the seeded
+students. One third of the new bills receive demo paid records; the rest show
+as outstanding dues. The command uses only the local PostgreSQL port, leaves
+other students and existing bills intact, and can be repeated safely.
+
 ## Connect clients
 
 | Service | Local address | Runs in |
