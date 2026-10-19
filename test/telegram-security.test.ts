@@ -2,7 +2,8 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { after, test } from 'node:test';
-import { ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { ExecutionContext, ForbiddenException, RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import type { AuthService } from '../src/auth/auth.service';
 import { AuthGuard } from '../src/auth/auth.guard';
@@ -119,6 +120,20 @@ test('Telegram connect links store only a digest of the one-time token', async (
   assert.equal(db.insertedTokens[0], createHash('sha256').update(rawToken).digest('hex'));
   assert.notEqual(db.insertedTokens[0], rawToken);
   assert.ok(Date.parse(result.expiresAt) > Date.now());
+});
+
+test('Telegram connect also accepts GET for released app builds', async () => {
+  const { connect, connectViaGet } = TelegramController.prototype;
+  assert.equal(Reflect.getMetadata(METHOD_METADATA, connect), RequestMethod.POST);
+  assert.equal(Reflect.getMetadata(METHOD_METADATA, connectViaGet), RequestMethod.GET);
+  assert.equal(Reflect.getMetadata(PATH_METADATA, connectViaGet), 'connect');
+  assert.deepEqual(Reflect.getMetadata('roles', connectViaGet), ['GUARDIAN']);
+
+  const db = telegramDb();
+  const controller = new TelegramController(new TelegramService(db as never));
+  const result = await controller.connectViaGet({ user: { id: 'guardian-1' } } as never);
+  assert.match(result.url, /^https:\/\/t\.me\/test_vehicle_bot\?start=connect_/);
+  assert.equal(db.insertedTokens.length, 1);
 });
 
 test('Telegram polling processes each update id once', async () => {

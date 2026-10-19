@@ -8,6 +8,8 @@ import { TransportService } from './transport.service';
 import { ManagementController } from '../management/management.controller';
 import { ManagementService } from '../management/management.service';
 import { TelegramModule } from '../telegram/telegram.module';
+import { MessagingController } from '../messaging/messaging.controller';
+import { MessagingService } from '../messaging/messaging.service';
 @Module({
   imports: [TelegramModule],
   controllers: [
@@ -15,8 +17,15 @@ import { TelegramModule } from '../telegram/telegram.module';
     PaymentsController,
     NotificationsController,
     ManagementController,
+    MessagingController,
   ],
-  providers: [TransportService, PaymentsService, NotificationsService, ManagementService],
+  providers: [
+    TransportService,
+    PaymentsService,
+    NotificationsService,
+    ManagementService,
+    MessagingService,
+  ],
   exports: [NotificationsService],
 })
 export class TransportModule {}

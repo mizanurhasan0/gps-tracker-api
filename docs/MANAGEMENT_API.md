@@ -21,10 +21,14 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | POST / PATCH | `/admin/maintenance`, `/admin/maintenance/:id` | `{vehicleId,title,description?,serviceDate,nextServiceDate?,amount,status?}` |
 | POST | `/admin/ledger` | `{type,category,title,amount,date,note?,vehicleId?,driverId?}` |
 | POST | `/admin/notices` | `{title,body,category,audience,targetId?}` |
+| GET / POST / PATCH / DELETE | `/admin/message-templates`, `/admin/message-templates/:id` | Saved messages `{title,body}` for Telegram messaging; see [Telegram messaging API](TELEGRAM_MESSAGING_API.md) |
+| GET | `/admin/telegram-messages/recipients?vehicleIds=<uuid>,<uuid>` | Eligible guardians of each selected vehicle, with their Telegram link state |
+| POST | `/admin/telegram-messages` | `{vehicleIds,guardianIds?,body,templateId?,requestId}`; sends one message to every eligible guardian (or only the selected ones). A repeated `requestId` returns the earlier message with 200 instead of sending again |
+| GET | `/admin/telegram-messages?page=1&pageSize=20`, `/admin/telegram-messages/:id` | Paged send history with delivery stats / one message with per-recipient status |
 | POST / PATCH / DELETE | `/admin/banners`, `/admin/banners/:id` | Admin-managed image cards; `{imageUrl,redirectRoute,sortOrder?,sliderDuration?,active?}`. `redirectRoute` is an allowed in-app route; `sliderDuration` is optional seconds (1-60, default 5). |
 | POST | `/management/requests` | `{studentId?,driverId?,vehicleId?,category,title,description,date?}` |
 | PATCH | `/admin/management-requests/:id/decision` | `{decision:"APPROVED" or "REJECTED",note?}`; rejection requires note |
-| PATCH | `/admin/settings` | Partial business contact information, message templates, operatingDays and transportShifts |
+| PATCH | `/admin/settings` | Partial business contact information, legacy SMS message templates, operatingDays and transportShifts |
 | PUT | `/admin/routes/:id/schedule` | `{entries:[{label,time,period,position,stopId?,studentId?}]}`; atomic replacement |
 | GET | `/admin/reports?month=YYYY-MM` | Monthly billing, cash flow, current counts, attendance counts and ledger rows |
 
@@ -96,9 +100,15 @@ schedule/driver access are revoked.
 
 Notice audiences are ALL, ROUTE, VEHICLE or STUDENT. Specific audiences require a
 valid target. Recipient accounts are captured when a notice is sent; notices and
-in-app notifications are saved in the same transaction. Notices do not perform
-external SMS/WhatsApp sends. Business settings store editable message templates
-and contact numbers for manual communication.
+in-app notifications are saved in the same transaction. Like every guardian
+notification, a notice is also queued for Telegram when the guardian has a
+connected Telegram link; notices never send SMS or WhatsApp. To message the
+guardians of selected vehicles directly, use admin Telegram messaging; its
+contract, eligibility rules and delivery statuses are in
+[Telegram messaging API](TELEGRAM_MESSAGING_API.md). Business settings still store
+the legacy SMS templates (`paymentReminder`, `absenceMessage`, `delayMessage`,
+`holidayMessage`, `emergencyMessage`) for older app builds; migration 15 copied
+the non-empty ones into saved messages.
 
 Attendance statuses are PRESENT, ABSENT and LEAVE. Exactly one student or driver
 must be specified per entry. An approved ABSENCE/LEAVE request also records that
@@ -140,6 +150,10 @@ existing subscriptions or bills; see [route fares](ROUTE_FARES.md).
 starts with real version 1 data. It tests upgrade/backfill, enrollment/admission,
 photo validation, role and ownership enforcement, transactional rollback, notices,
 requests, schedule privacy, financial totals and stop revocation.
+`test/telegram-messaging.test.ts` covers saved messages, recipient eligibility,
+sending, history status mapping and the `GET /telegram/connect` alias;
+`test/messaging-migration.test.ts` covers the migration 15 seed and the
+migration 16 `requestId` backfill.
 
 ```sh
 TEST_DATABASE_URL=postgresql://... npm test

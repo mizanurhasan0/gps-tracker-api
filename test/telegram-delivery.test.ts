@@ -58,3 +58,41 @@ test('notification delivery worker does not deliver the same claimed job twice',
   assert.equal(db.updates.filter((sql) => sql.includes("status = 'SENT'")).length, 1);
   service.onApplicationShutdown();
 });
+
+test('notification delivery worker drains a backlog at a paced rate', async () => {
+  // Twelve jobs exceed one batch of ten; the first two share a chat.
+  const jobs = Array.from({ length: 12 }, (_, index) => ({
+    id: `delivery-${index}`,
+    notificationId: `notification-${index}`,
+    guardianId: `guardian-${index}`,
+    chatId: String(index === 1 ? 88000 : 88000 + index),
+    title: 'Notice',
+    body: 'Bus is late',
+    attempts: 0,
+  }));
+  const db = {
+    transaction: <T>(work: () => Promise<T>) => work(),
+    get: async () => jobs.shift(),
+    run: async () => ({ rowCount: 1 }),
+  };
+  const sends: { chatId: string; at: number }[] = [];
+  let drained!: () => void;
+  const allSent = new Promise<void>((resolve) => (drained = resolve));
+  const telegram: TelegramDeliveryPort = {
+    deliver: async ({ chatId }) => {
+      sends.push({ chatId, at: Date.now() });
+      if (sends.length === 12) drained();
+      return { status: 'SENT' };
+    },
+  };
+  const service = new NotificationsService(db as never, telegram);
+  void (service as unknown as { processDeliveries: () => Promise<void> }).processDeliveries();
+
+  await allSent;
+  await service.onApplicationShutdown();
+  assert.equal(sends.length, 12);
+  for (let index = 1; index < sends.length; index++)
+    assert.ok(sends[index].at - sends[index - 1].at >= 95, `send ${index} was not paced`);
+  assert.equal(sends[0].chatId, sends[1].chatId);
+  assert.ok(sends[1].at - sends[0].at >= 995, 'a chat received two messages within a second');
+});

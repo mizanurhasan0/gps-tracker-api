@@ -20,6 +20,13 @@ export class TelegramController {
     return this.telegram.issueConnectLink(request.user.id);
   }
 
+  /** POST is canonical; released app builds still call GET. */
+  @Roles('GUARDIAN')
+  @Get('connect')
+  connectViaGet(@Req() request: AuthRequest) {
+    return this.connect(request);
+  }
+
   @Roles('GUARDIAN')
   @Get('status')
   status(@Req() request: AuthRequest) {

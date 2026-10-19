@@ -18,6 +18,8 @@ The Noor management module adds connected student/driver profiles, attendance,
 maintenance, an income/expense/investment ledger, targeted notices, requests,
 business settings, route schedules and monthly financial summaries. See
 [management API](docs/MANAGEMENT_API.md) for contracts and migration details.
+Admins message the guardians of selected vehicles through Telegram, with saved
+messages and a delivery history; see [Telegram messaging API](docs/TELEGRAM_MESSAGING_API.md).
 [Boarding and destination fares](docs/ROUTE_FARES.md) configure different monthly
 charges for each student journey on the same route.
 
@@ -98,6 +100,12 @@ All endpoints below except registration/login require
 | PATCH | `/admin/stop-requests/:id/decision` | Approve with `{decision:"APPROVED",stopDate,finalMonthlyFee,note?}` or reject with `{decision:"REJECTED",note}` |
 | GET | `/notifications` | Own newest 100 notifications |
 | PATCH | `/notifications/:id/read` | Mark own notification read |
+| POST / GET | `/telegram/connect` | Guardian: one-time Telegram link. POST is canonical; GET is kept for released app builds |
+| GET / DELETE | `/telegram/status`, `/telegram` | Guardian: Telegram link state / disconnect |
+| GET / POST / PATCH / DELETE | `/admin/message-templates`, `/admin/message-templates/:id` | Admin saved messages `{title,body}` |
+| GET | `/admin/telegram-messages/recipients?vehicleIds=a,b` | Admin: eligible guardians per vehicle and whether each has Telegram connected |
+| POST | `/admin/telegram-messages` | Admin: `{vehicleIds,guardianIds?,body,templateId?,requestId}`; in-app notification for every recipient, Telegram for connected guardians; a repeated `requestId` returns the earlier message (200) |
+| GET | `/admin/telegram-messages`, `/admin/telegram-messages/:id` | Admin: paged send history / per-recipient delivery status |
 
 Example manual payment body (**amounts are integer poisha**, not taka):
 
@@ -129,7 +137,8 @@ submission is allowed per bill. A paid bill cannot be paid again through this AP
 Approval updates the submission, bill, audit record and guardian notification in
 one database transaction. Competing decisions receive HTTP 409; failure to persist
 any part rolls back the whole decision. No external SMS, calls or money transfers
-are performed by the server.
+are performed by the server. Guardian notifications are also queued for Telegram
+when the guardian has connected Telegram.
 
 ## Service rules
 
@@ -214,7 +223,9 @@ Telegram is disabled by default. When enabled, the API validates that a BotFathe
 token is set, removes any previously registered Telegram webhook, and receives private
 messages through long polling. A public domain and HTTPS certificate are not
 needed. The bot token must never be committed or printed in logs. Run exactly one
-API replica per bot while polling is enabled. The radius and time window are read
+API replica per bot while polling is enabled. The delivery worker sends at most
+10 messages per second and waits at least one second between messages to the same
+chat, which keeps a bulk admin message well under Telegram's bot limits. The radius and time window are read
 by the pickup alert/geofence implementation; they do not change tracker online
 status.
 
