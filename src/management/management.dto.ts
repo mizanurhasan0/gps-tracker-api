@@ -5,7 +5,7 @@ import { trim } from '../auth/auth.dto';
 export class StudentListQueryDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(1_000_000) page?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) pageSize?: number;
-  @IsOptional() @IsIn(['ALL', 'ACTIVE', 'ABSENT', 'LEAVE', 'ARCHIVED']) status?: string;
+  @IsOptional() @IsIn(['ALL', 'ACTIVE', 'ARCHIVED']) status?: 'ALL' | 'ACTIVE' | 'ARCHIVED';
   @IsOptional() @Transform(trim) @IsString() @MaxLength(120) search?: string;
   @IsOptional() @IsUUID() vehicleId?: string;
 }
@@ -64,16 +64,6 @@ export class CreateDriverDto extends DriverDetailsDto {
 export class UpdateDriverDto extends DriverDetailsDto {
   @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(100) name?: string;
   @IsOptional() @Transform(trim) @IsString() @Matches(/^(?:\+?88)?01[3-9]\d{8}$/) phone?: string;
-}
-export class AttendanceEntryDto {
-  @IsOptional() @IsUUID() studentId?: string;
-  @IsOptional() @IsUUID() driverId?: string;
-  @Matches(/^\d{4}-\d{2}-\d{2}$/) @IsDateString({strict:true}) date!: string;
-  @IsIn(['PRESENT','ABSENT','LEAVE']) status!: 'PRESENT' | 'ABSENT' | 'LEAVE';
-  @IsOptional() @Transform(trim) @IsString() @MaxLength(500) note?: string;
-}
-export class AttendanceBatchDto {
-  @IsArray() @ArrayMaxSize(500) @ValidateNested({each:true}) @Type(()=>AttendanceEntryDto) entries!: AttendanceEntryDto[];
 }
 export class CreateMaintenanceDto {
   @IsUUID() vehicleId!: string;

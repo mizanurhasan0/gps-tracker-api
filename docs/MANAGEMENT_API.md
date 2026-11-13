@@ -7,8 +7,8 @@ amounts are integer **poisha**. The matching mobile contracts are in
 
 | Method | Endpoint | Body / behavior |
 |---|---|---|
-| GET | `/management/overview` | `{students,today,todayStudents,drivers,attendance,maintenance,ledger,notices,banners,requests,settings,schedules}`; guardians receive published image banners, while admins also receive hidden banners for management |
-| GET | `/admin/students?page=1&pageSize=10&status=ALL&search=&vehicleId=` | Admin student page: `{items,page,pageSize,total,totalPages,counts}`. `status` accepts `ALL`, `ACTIVE`, `ABSENT`, `LEAVE`, or `ARCHIVED`; search and vehicle filters apply before paging. Counts are canonical student profiles and use the Asia/Dhaka attendance date. |
+| GET | `/management/overview` | `{students,today,todayStudents,drivers,maintenance,ledger,notices,banners,requests,settings,schedules}`; guardians receive published image banners, while admins also receive hidden banners for management |
+| GET | `/admin/students?page=1&pageSize=10&status=ALL&search=&vehicleId=` | Admin student page: `{items,page,pageSize,total,totalPages,counts}`. `status` accepts `ALL`, `ACTIVE`, or `ARCHIVED`; search and vehicle filters apply before paging. `counts` is `{all,active,archived}` and counts canonical student profiles. |
 | POST | `/admin/students` | `{studentName,guardianPhone,guardianName?,routeId,stopId,...profile}`; reuses or creates a guardian account; returns student fields plus `guardianAccountCreated` |
 | PATCH | `/admin/students/:id` | Partial student fields, route/stop/dropoffStopId and legacy monthlyAmount; active services must use the stop action below |
 | PATCH | `/admin/students/:id/stop` | `{stopDate,finalMonthlyFee,reason?}`; non-destructively stops one shift and settles its current-month bill |
@@ -17,7 +17,6 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | GET | `/admin/students/archived` | Archived students as the existing enrollment-shaped student rows, including `archivedAt` and `archivedBy` |
 | PUT | `/admin/routes/:id/fares` | Atomic replacement `{fares:[{boardingStopId,dropoffStopId,monthlyAmount}]}` |
 | POST / PATCH | `/admin/drivers`, `/admin/drivers/:id` | Name, phone, NID, address, joiningDate, monthlySalary, status, optional vehicleId |
-| PUT | `/admin/attendance` | `{entries:[{studentId or driverId,date,status,note?}]}`; atomic upsert, max 500 |
 | POST / PATCH | `/admin/maintenance`, `/admin/maintenance/:id` | `{vehicleId,title,description?,serviceDate,nextServiceDate?,amount,status?}` |
 | POST | `/admin/ledger` | `{type,category,title,amount,date,note?,vehicleId?,driverId?}` |
 | POST | `/admin/notices` | `{title,body,category,audience,targetId?}` |
@@ -27,10 +26,10 @@ amounts are integer **poisha**. The matching mobile contracts are in
 | GET | `/admin/telegram-messages?page=1&pageSize=20`, `/admin/telegram-messages/:id` | Paged send history with delivery stats / one message with per-recipient status |
 | POST / PATCH / DELETE | `/admin/banners`, `/admin/banners/:id` | Admin-managed image cards; `{imageUrl,redirectRoute,sortOrder?,sliderDuration?,active?}`. `redirectRoute` is an allowed in-app route; `sliderDuration` is optional seconds (1-60, default 5). |
 | POST | `/management/requests` | `{studentId?,driverId?,vehicleId?,category,title,description,date?}` |
-| PATCH | `/admin/management-requests/:id/decision` | `{decision:"APPROVED" or "REJECTED",note?}`; rejection requires note |
+| PATCH | `/admin/management-requests/:id/decision` | `{decision:"APPROVED" or "REJECTED",note?}`; rejection requires note; updates the request status, notifies the requester and writes an audit entry |
 | PATCH | `/admin/settings` | Partial business contact information, legacy SMS message templates, operatingDays and transportShifts |
 | PUT | `/admin/routes/:id/schedule` | `{entries:[{label,time,period,position,stopId?,studentId?}]}`; atomic replacement |
-| GET | `/admin/reports?month=YYYY-MM` | Monthly billing, cash flow, current counts, attendance counts and ledger rows |
+| GET | `/admin/reports?month=YYYY-MM` | `{month,billing,cashflow,students,drivers,vehicles,ledger}`: monthly billing, cash flow, current counts and ledger rows |
 
 Student profile fields are `studentCode,className,roll,dateOfBirth,bloodGroup,
 photoUrl,pickupAddress,dropAddress,emergencyContact`. `dateOfBirth` accepts an
@@ -62,8 +61,8 @@ Restarting a stopped service requires a new enrollment. A stopped subscription
 cannot be changed back to active, which preserves its closed billing period.
 Archiving applies to the canonical student across every shift. It is refused while
 the student has a pending service request, stops every active subscription, hides
-the profile from normal admin and guardian overviews, and preserves attendance,
-bills, payments, requests and audit history. Restore makes the profile available
+the profile from normal admin and guardian overviews, and preserves bills,
+payments, requests and audit history. Restore makes the profile available
 again but deliberately leaves its former subscriptions stopped. Archived profiles
 cannot be edited, reused by ID, or silently reused by name until restored.
 
@@ -72,7 +71,7 @@ than today and no earlier than enrollment. An unpaid bill is adjusted; a zero fi
 fee waives an existing bill or creates no bill when none exists. Pending payment
 evidence must be reviewed first. Paid bills are immutable and can only be stopped
 with the already-paid amount. The settlement, reason and previous amount are kept
-in `service_settlements`; attendance/payment history remains intact and current
+in `service_settlements`; payment history remains intact and current
 route-schedule assignments are removed. Future bill generation excludes the service.
 
 `photoUrl` allows an empty value, HTTPS URI, or JPEG/PNG base64 data URI up to
@@ -90,12 +89,12 @@ role in this release. Admins can record requests on a driver's behalf.
 
 ## Data boundaries and consistency
 
-Guardian overview responses include only their student profiles, attendance,
-requests and delivered notices. Driver contact data is limited to active assigned
+Guardian overview responses include only their student profiles, requests and
+delivered notices. Driver contact data is limited to active assigned
 vehicles, with NID, salary, address and joining date removed. Maintenance and
 ledger arrays are empty for guardians. Schedules include only active assigned
 routes and the guardian's own students/stops or general route events. Stopped
-students retain historical attendance and payments, while tracking and active
+students retain historical bills and payments, while tracking and active
 schedule/driver access are revoked.
 
 Notice audiences are ALL, ROUTE, VEHICLE or STUDENT. Specific audiences require a
@@ -110,9 +109,12 @@ the legacy SMS templates (`paymentReminder`, `absenceMessage`, `delayMessage`,
 `holidayMessage`, `emergencyMessage`) for older app builds; migration 15 copied
 the non-empty ones into saved messages.
 
-Attendance statuses are PRESENT, ABSENT and LEAVE. Exactly one student or driver
-must be specified per entry. An approved ABSENCE/LEAVE request also records that
-person's attendance transactionally. Requests cannot be reviewed twice.
+Request categories are ABSENCE, LEAVE, MAINTENANCE and OTHER. ABSENCE and LEAVE
+requests need a date and exactly one person: ABSENCE a student, LEAVE a student or
+driver. Approving or rejecting a request updates its status, notifies the
+requester and writes an audit entry; it records nothing else. Requests cannot be
+reviewed twice. The API no longer has an attendance feature: the legacy
+`attendance` table and its rows stay in the database but are not read or written.
 
 Maintenance statuses are PLANNED, IN_PROGRESS and COMPLETED. An in-progress record
 sets the vehicle to MAINTENANCE. Only completed positive costs create an EXPENSE
@@ -149,7 +151,8 @@ existing subscriptions or bills; see [route fares](ROUTE_FARES.md).
 `test/management.test.ts` boots HTTP against a disposable PostgreSQL schema that
 starts with real version 1 data. It tests upgrade/backfill, enrollment/admission,
 photo validation, role and ownership enforcement, transactional rollback, notices,
-requests, schedule privacy, financial totals and stop revocation.
+requests, admin student list filters, schedule privacy, financial totals and stop
+revocation.
 `test/telegram-messaging.test.ts` covers saved messages, recipient eligibility,
 sending, history status mapping and the `GET /telegram/connect` alias;
 `test/messaging-migration.test.ts` covers the migration 15 seed and the
@@ -166,8 +169,8 @@ and removes its own uniquely named schema in the explicitly provided test DB.
 
 Migration 4 adds a canonical `student_profiles` record while retaining existing
 `students.id`/`subscriptionId` enrollment IDs. Existing bills, stops, vehicle access,
-route schedule targets, management request `studentId` and attendance `studentId`
-continue to reference **enrollment IDs**. The `studentId` returned on transport
+route schedule targets and management request `studentId` continue to reference
+**enrollment IDs**. The `studentId` returned on transport
 requests, subscriptions and management students is the **canonical profile ID**.
 Bills and payment submissions expose that canonical `studentId` plus `shiftId`.
 Reports count distinct canonical students, while charges remain per enrollment.
@@ -193,9 +196,9 @@ times on a common operating day return a `warnings` array when enrolling/updatin
 Omitted days on new services use institution settings; updates retain the current
 calendar when omitted. A selection must overlap at least one institution operating
 day. Effective travel days are the intersection of both calendars. Today's
-`scheduledToday` and `todayStudents` use the Asia/Dhaka date (`today`). Attendance
-and absence/leave requests are rejected on unscheduled days; existing historical
-attendance remains intact when calendars change. Driver attendance is independent.
+`scheduledToday` and `todayStudents` use the Asia/Dhaka date (`today`). Student
+absence/leave requests are rejected on days the enrollment has no scheduled
+transport.
 
 `PATCH /admin/settings` accepts `operatingDays` and `transportShifts`, an array of
 1–20 `{id,name,startTime,endTime}` entries. IDs are unique stable strings matching
@@ -207,6 +210,6 @@ an admin can explicitly set institute off days after upgrading. Migration also
 preserves previously renamed/edited student profiles and enrollment references.
 
 `test/student-shifts.test.ts` checks ownership, canonical profile reuse, duplicate
-and concurrent claims, calendar validation, attendance, overlap warnings, stopped
+and concurrent claims, calendar validation, absence request scheduling, overlap warnings, stopped
 service replacement and shift billing. `test/student-shifts-migration.test.ts`
-checks preservation of real version 3 profile edits, bills and attendance.
+checks preservation of real version 3 profile edits, bills and legacy attendance rows.

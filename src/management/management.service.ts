@@ -16,7 +16,7 @@ import { DecisionDto } from '../payments/payments.dto';
 import { journeyFare } from '../transport/journey-fare';
 import {
   assertAvailableShift,
-  assertScheduledAttendance,
+  assertScheduledTransport,
   overlapWarnings,
   resolveSchedule,
   resolveStudent,
@@ -26,7 +26,6 @@ import {
   validateDays,
 } from '../transport/student-schedule';
 import {
-  AttendanceBatchDto,
   CreateBannerDto,
   CreateDriverDto,
   CreateLedgerDto,
@@ -63,16 +62,6 @@ const studentListCte = `WITH enrollment_rows AS (
     s."studentId",s."shiftId",s."operatingDays",s.id "subscriptionId",s."guardianId",s."studentName",s."routeId",s."stopId",s."dropoffStopId",s."monthlyAmount",s.status,s."startedAt",s."stoppedAt",s."stoppedOn",s."stopReason",s."finalMonthlyFee",
     u.name "guardianName",u.phone "guardianPhone",r.name "routeName",t.name "stopName",d.name "dropoffStopName",v.id "vehicleId",v.name "vehicleName",
     v."driverName" "driverName",v."driverPhone" "driverPhone",
-    EXISTS (
-      SELECT 1 FROM subscriptions attendance_service
-      JOIN attendance a ON a."studentId"=attendance_service.id
-      WHERE attendance_service."studentId"=s."studentId" AND a.date=$1 AND a.status='ABSENT'
-    ) "hasAbsent",
-    EXISTS (
-      SELECT 1 FROM subscriptions attendance_service
-      JOIN attendance a ON a."studentId"=attendance_service.id
-      WHERE attendance_service."studentId"=s."studentId" AND a.date=$1 AND a.status='LEAVE'
-    ) "hasLeave",
     ROW_NUMBER() OVER (
       PARTITION BY s."studentId"
       ORDER BY CASE WHEN s.status='ACTIVE' THEN 0 ELSE 1 END,
@@ -92,13 +81,11 @@ const studentListCte = `WITH enrollment_rows AS (
 )`;
 
 const studentCategoryCondition = `(
-  ($4::text='ALL' AND "archivedAt" IS NULL) OR
-  ($4::text='ACTIVE' AND "archivedAt" IS NULL AND status='ACTIVE') OR
-  ($4::text='ABSENT' AND "archivedAt" IS NULL AND "hasAbsent") OR
-  ($4::text='LEAVE' AND "archivedAt" IS NULL AND "hasLeave") OR
-  ($4::text='ARCHIVED' AND "archivedAt" IS NOT NULL)
+  ($3::text='ALL' AND "archivedAt" IS NULL) OR
+  ($3::text='ACTIVE' AND "archivedAt" IS NULL AND status='ACTIVE') OR
+  ($3::text='ARCHIVED' AND "archivedAt" IS NOT NULL)
 )`;
-const studentListFields = `id,"studentId","shiftId","operatingDays","subscriptionId","guardianId","studentName","studentCode","className",roll,"dateOfBirth","bloodGroup","photoUrl","guardianName","guardianPhone","pickupAddress","dropAddress","emergencyContact","routeId","routeName","stopId","stopName","dropoffStopId","dropoffStopName","vehicleId","vehicleName","driverName","driverPhone","monthlyAmount",status,"startedAt","stoppedAt","stoppedOn","stopReason","finalMonthlyFee","archivedAt","archivedBy","hasAbsent","hasLeave"`;
+const studentListFields = `id,"studentId","shiftId","operatingDays","subscriptionId","guardianId","studentName","studentCode","className",roll,"dateOfBirth","bloodGroup","photoUrl","guardianName","guardianPhone","pickupAddress","dropAddress","emergencyContact","routeId","routeName","stopId","stopName","dropoffStopId","dropoffStopName","vehicleId","vehicleName","driverName","driverPhone","monthlyAmount",status,"startedAt","stoppedAt","stoppedOn","stopReason","finalMonthlyFee","archivedAt","archivedBy"`;
 
 @Injectable()
 export class ManagementService {
@@ -112,7 +99,6 @@ export class ManagementService {
     const [
       students,
       drivers,
-      attendance,
       maintenance,
       ledger,
       notices,
@@ -131,11 +117,6 @@ export class ManagementService {
         JOIN routes r ON r.id=s."routeId" WHERE r."vehicleId"=d."vehicleId" AND s."guardianId"=$1 AND s.status='ACTIVE' AND r.active=1)`,
             user.id,
           ),
-      this.db.all(
-        `SELECT a.* FROM attendance a WHERE $1::boolean OR EXISTS (SELECT 1 FROM subscriptions s WHERE s.id=a."studentId" AND s."guardianId"=$2) ORDER BY a.date DESC,a.id`,
-        isAdmin,
-        user.id,
-      ),
       isAdmin ? this.maintenance() : Promise.resolve([]),
       isAdmin
         ? this.db.all('SELECT * FROM ledger ORDER BY date DESC,"createdAt" DESC')
@@ -173,7 +154,6 @@ export class ManagementService {
       today,
       todayStudents: scheduledStudents.filter((student) => student.scheduledToday),
       drivers,
-      attendance,
       maintenance,
       ledger,
       notices,
@@ -205,20 +185,16 @@ export class ManagementService {
     const status = input.status ?? 'ALL';
     const search = input.search?.trim() ?? '';
     const vehicleId = input.vehicleId ?? null;
-    const today = dhakaDate();
     const countRow = await this.db.get<Row>(
       `${studentListCte}
       SELECT
         COUNT(*) FILTER (WHERE ${studentCategoryCondition}
-          AND ($2::text='' OR LOWER(CONCAT_WS(' ',"studentName","studentCode","guardianName","routeName")) LIKE '%' || LOWER($2) || '%')
-          AND ($3::text IS NULL OR "vehicleId"=$3))::int total,
+          AND ($1::text='' OR LOWER(CONCAT_WS(' ',"studentName","studentCode","guardianName","routeName")) LIKE '%' || LOWER($1) || '%')
+          AND ($2::text IS NULL OR "vehicleId"=$2))::int total,
         COUNT(*) FILTER (WHERE "archivedAt" IS NULL)::int "allCount",
         COUNT(*) FILTER (WHERE "archivedAt" IS NULL AND status='ACTIVE')::int "activeCount",
-        COUNT(*) FILTER (WHERE "archivedAt" IS NULL AND "hasAbsent")::int "absentCount",
-        COUNT(*) FILTER (WHERE "archivedAt" IS NULL AND "hasLeave")::int "leaveCount",
         COUNT(*) FILTER (WHERE "archivedAt" IS NOT NULL)::int "archivedCount"
       FROM canonical_students`,
-      today,
       search,
       vehicleId,
       status,
@@ -230,11 +206,10 @@ export class ManagementService {
       `${studentListCte}
       SELECT ${studentListFields} FROM canonical_students
       WHERE ${studentCategoryCondition}
-        AND ($2::text='' OR LOWER(CONCAT_WS(' ',"studentName","studentCode","guardianName","routeName")) LIKE '%' || LOWER($2) || '%')
-        AND ($3::text IS NULL OR "vehicleId"=$3)
+        AND ($1::text='' OR LOWER(CONCAT_WS(' ',"studentName","studentCode","guardianName","routeName")) LIKE '%' || LOWER($1) || '%')
+        AND ($2::text IS NULL OR "vehicleId"=$2)
       ORDER BY "studentName",id
-      LIMIT $5 OFFSET $6`,
-      today,
+      LIMIT $4 OFFSET $5`,
       search,
       vehicleId,
       status,
@@ -250,8 +225,6 @@ export class ManagementService {
       counts: {
         all: Number(countRow?.allCount ?? 0),
         active: Number(countRow?.activeCount ?? 0),
-        absent: Number(countRow?.absentCount ?? 0),
-        leave: Number(countRow?.leaveCount ?? 0),
         archived: Number(countRow?.archivedCount ?? 0),
       },
     };
@@ -811,41 +784,6 @@ export class ManagementService {
     });
   }
 
-  async attendance(actor: User, input: AttendanceBatchDto) {
-    return this.write(async () => {
-      const seen = new Set<string>();
-      for (const entry of input.entries) {
-        if (Boolean(entry.studentId) === Boolean(entry.driverId))
-          throw new BadRequestException('Provide exactly one studentId or driverId');
-        const key = `${entry.studentId ?? entry.driverId}:${entry.date}`;
-        if (seen.has(key)) throw new BadRequestException('Duplicate attendance entry');
-        seen.add(key);
-        const field = entry.studentId ? 'studentId' : 'driverId';
-        const personId = entry.studentId ?? entry.driverId!;
-        await this.require(entry.studentId ? 'students' : 'drivers', personId);
-        if (entry.studentId) await assertScheduledAttendance(this.db, personId, entry.date);
-        await this.db.run(
-          `INSERT INTO attendance(id,"${field}",date,status,note,"updatedAt","recordedBy") VALUES($1,$2,$3,$4,$5,$6,$7)
-          ON CONFLICT("${field}",date) WHERE "${field}" IS NOT NULL DO UPDATE SET status=EXCLUDED.status,note=EXCLUDED.note,"updatedAt"=EXCLUDED."updatedAt","recordedBy"=EXCLUDED."recordedBy"`,
-          randomUUID(),
-          personId,
-          entry.date,
-          entry.status,
-          entry.note ?? '',
-          now(),
-          actor.id,
-        );
-      }
-      await this.notifications.audit(
-        actor.id,
-        'ATTENDANCE_SAVED',
-        actor.id,
-        `${input.entries.length} records`,
-      );
-      return { saved: input.entries.length };
-    });
-  }
-
   maintenance(id?: string) {
     return this.db.all<Row>(
       `SELECT m.*,v.name "vehicleName" FROM maintenance m JOIN vehicles v ON v.id=m."vehicleId" WHERE ($1::text IS NULL OR m.id=$1) ORDER BY m."serviceDate" DESC,m.id`,
@@ -1096,7 +1034,7 @@ export class ManagementService {
       if (['ABSENCE', 'LEAVE'].includes(input.category) && input.studentId && input.driverId)
         throw new BadRequestException('Select one person for absence or leave');
       if (input.studentId && input.date && ['ABSENCE', 'LEAVE'].includes(input.category))
-        await assertScheduledAttendance(this.db, input.studentId, input.date);
+        await assertScheduledTransport(this.db, input.studentId, input.date);
       const id = randomUUID();
       await this.db.run(
         `INSERT INTO management_requests(id,"userId","studentId","driverId","vehicleId",category,title,description,date,"createdAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
@@ -1131,23 +1069,6 @@ export class ManagementService {
         actor.id,
         id,
       );
-      if (
-        input.decision === 'APPROVED' &&
-        ['ABSENCE', 'LEAVE'].includes(request.category) &&
-        request.date
-      ) {
-        await this.attendance(actor, {
-          entries: [
-            {
-              studentId: request.studentId ?? undefined,
-              driverId: request.driverId ?? undefined,
-              date: request.date,
-              status: request.category === 'ABSENCE' ? 'ABSENT' : 'LEAVE',
-              note: request.description,
-            },
-          ],
-        });
-      }
       await this.notifications.create(
         request.userId,
         input.decision === 'APPROVED' ? 'রিকোয়েস্ট অনুমোদিত' : 'রিকোয়েস্ট প্রত্যাখ্যাত',
@@ -1265,10 +1186,6 @@ export class ManagementService {
       const vehicles = await this.db.get<{ count: number }>(
         'SELECT count(*)::int count FROM vehicles',
       );
-      const attendance = await this.db.get<Row>(
-        `SELECT count(*) FILTER(WHERE status='PRESENT')::int present,count(*) FILTER(WHERE status='ABSENT')::int absent,count(*) FILTER(WHERE status='LEAVE')::int leave FROM attendance WHERE left(date,7)=$1`,
-        month,
-      );
       const fare = await this.db.get<{ amount: number }>(
         `SELECT COALESCE(sum(cash.amount),0)::float8 amount FROM (
            SELECT p.amount, COALESCE(p."reviewedAt", b."paidAt") "receivedAt"
@@ -1301,7 +1218,6 @@ export class ManagementService {
         students,
         drivers: drivers!.count,
         vehicles: vehicles!.count,
-        attendance,
         ledger,
       };
     });

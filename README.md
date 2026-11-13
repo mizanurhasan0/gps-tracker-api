@@ -14,7 +14,7 @@ authenticated REST API, and pushes authorized live updates over Socket.IO.
 The transport modules add guardian/admin accounts, routes/stops, approval-based
 service subscriptions, configurable payment methods, QR images and payment evidence, complaints, stop requests,
 persistent in-app notifications and audit history. No payment gateway is used.
-The Noor management module adds connected student/driver profiles, attendance,
+The Noor management module adds connected student/driver profiles,
 maintenance, an income/expense/investment ledger, targeted notices, requests,
 business settings, route schedules and monthly financial summaries. See
 [management API](docs/MANAGEMENT_API.md) for contracts and migration details.

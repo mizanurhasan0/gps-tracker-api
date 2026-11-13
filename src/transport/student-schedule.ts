@@ -142,7 +142,7 @@ export function scheduledOn(operatingDays: number[], instituteDays: number[], da
   const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
   return operatingDays.includes(weekday) && instituteDays.includes(weekday);
 }
-export async function assertScheduledAttendance(
+export async function assertScheduledTransport(
   db: DatabaseService,
   enrollmentId: string,
   date: string,

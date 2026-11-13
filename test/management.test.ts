@@ -142,16 +142,6 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     assert.equal(overview.students.length,1);assert.equal(overview.students[0].id,student.id);
     assert.deepEqual(overview.ledger,[]);assert.deepEqual(overview.maintenance,[]);
   });
-  await t.test('attendance is an atomic upsert and validates every referenced person',async()=>{
-    const entry={studentId:student.id,date:'2026-09-10',status:'PRESENT'};
-    await request('/admin/attendance',admin.token,{entries:[entry,{driverId:driver.id,date:'2026-09-10',status:'ABSENT'}]},'PUT');
-    await request('/admin/attendance',admin.token,{entries:[{...entry,status:'ABSENT'}]},'PUT');
-    assert.equal((await request('/management/overview',guardian.token)).attendance.length,1);
-    await request('/admin/attendance',admin.token,{entries:[{...entry,status:'PRESENT'},{studentId:randomUUID(),date:'2026-09-10',status:'PRESENT'}]},'PUT',404);
-    assert.equal((await request('/management/overview',guardian.token)).attendance[0].status,'ABSENT');
-    await request('/admin/attendance',admin.token,{entries:[entry,entry]},'PUT',400);
-    await request('/admin/attendance',admin.token,{entries:[{...entry,driverId:driver.id}]},'PUT',400);
-  });
   await t.test('maintenance costs update exactly one expense and roll back on downstream failure',async()=>{
     maintenance=await request('/admin/maintenance',admin.token,{vehicleId:vehicle.id,title:'Oil change',serviceDate:'2026-09-10',nextServiceDate:'2026-10-01',amount:50000,status:'IN_PROGRESS'},'POST',201);
     assert.equal((await request(`/vehicles/${vehicle.id}`,admin.token)).status,'MAINTENANCE');
@@ -191,7 +181,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     await request('/admin/banners/' + banner.id,admin.token,undefined,'DELETE',200);
     await request('/admin/banners/' + banner.id,admin.token,undefined,'DELETE',404);
   });
-  await t.test('requests enforce guardian ownership and approved absence records attendance',async()=>{
+  await t.test('requests enforce guardian ownership and reviews update only status, notification and audit',async()=>{
     await request('/management/requests',other.token,{studentId:student.id,category:'ABSENCE',title:'Absence',description:'Away for one day',date:'2026-09-11'},'POST',403);
     await request('/management/requests',guardian.token,{studentId:student.id,vehicleId:vehicle.id,category:'OTHER',title:'Vehicle',description:'Details here'},'POST',403);
     const item=await request('/management/requests',guardian.token,{studentId:student.id,category:'ABSENCE',title:'Absence',description:'Away for one day',date:'2026-09-11'},'POST',201);
@@ -200,7 +190,22 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     await request(`/admin/management-requests/${item.id}/decision`,admin.token,{decision:'APPROVED'},'PATCH',409);
     assert.equal((await request('/management/overview',other.token)).requests.length,0);
     const overview=await request('/management/overview',guardian.token);
-    assert.equal(overview.requests[0].status,'APPROVED');assert.ok(overview.attendance.some((a:Row)=>a.date==='2026-09-11'&&a.status==='ABSENT'));
+    assert.equal(overview.requests[0].status,'APPROVED');
+    assert.equal('attendance' in overview,false);
+    assert.equal('attendance' in (await request('/management/overview',admin.token)),false);
+  });
+  await t.test('approving absence or leave writes no attendance row and still notifies and audits',async()=>{
+    const attendanceRows=async()=>(await db.get('SELECT count(*)::int count FROM attendance')).count;
+    const absence=await request('/management/requests',guardian.token,{studentId:student.id,category:'ABSENCE',title:'Absence two',description:'Away for another day',date:'2026-09-13'},'POST',201);
+    const leave=await request('/management/requests',admin.token,{driverId:driver.id,category:'LEAVE',title:'Driver leave',description:'Family event',date:'2026-09-13'},'POST',201);
+    for(const [item,token] of [[absence,guardian.token],[leave,admin.token]] as const){
+      const approved=await request(`/admin/management-requests/${item.id}/decision`,admin.token,{decision:'APPROVED',note:'Approved'},'PATCH');
+      assert.equal(approved.status,'APPROVED');assert.equal(approved.note,'Approved');assert.ok(approved.reviewedAt);
+      assert.ok((await request('/notifications',token)).some((n:Row)=>n.entityId===item.id&&n.title==='রিকোয়েস্ট অনুমোদিত'));
+      assert.ok(await db.get(`SELECT id FROM audit_logs WHERE action='MANAGEMENT_REQUEST_APPROVED' AND "entityId"=$1`,item.id));
+    }
+    assert.equal(await attendanceRows(),0);
+    assert.equal(await db.get(`SELECT id FROM audit_logs WHERE action='ATTENDANCE_SAVED'`),undefined);
   });
   await t.test('route schedules are atomic and hide other students and stops',async()=>{
     const entries=[{studentId:student.id,stopId:route.stops[0].id,label:'Abdullah pickup',time:'06:00',period:'MORNING',position:0},
@@ -220,6 +225,7 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     const report=await request('/admin/reports?month=2026-09',admin.token);
     assert.deepEqual(report.cashflow,{fareReceived:0,otherIncome:200000,expenses:100000,investment:900000,net:100000});
     assert.equal(report.students.total,3);assert.equal(report.ledger.length,4);
+    assert.deepEqual(Object.keys(report).sort(),['billing','cashflow','drivers','ledger','month','students','vehicles']);
   });
   await t.test('stopping a student revokes their assigned operational projection',async()=>{
     const stopDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Dhaka',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
@@ -241,7 +247,6 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     const overview=await request('/management/overview',guardian.token);
     assert.equal(overview.students[0].status,'STOPPED');assert.deepEqual(overview.drivers,[]);assert.deepEqual(overview.schedules,[]);
     assert.equal(overview.students[0].driverName,null);assert.equal(overview.students[0].driverPhone,null);
-    assert.equal(overview.attendance.length,2,'historical attendance stays available');
     assert.deepEqual(overview.schedules,[],'current route assignment is removed');
     assert.deepEqual(await request('/vehicles',guardian.token),{vehicles:[]});
     await request('/admin/bills/generate',admin.token,{month:stopDate.slice(0,7)},'POST',201);
@@ -260,5 +265,26 @@ test('management PostgreSQL HTTP integration and version 1 upgrade',{skip:!datab
     await request(`/admin/students/${legacy.student}`,admin.token,{monthlyAmount:300000},'PATCH');
     const bills=await request(`/payments/monthly?month=${previousMonth}`,admin.token);
     assert.equal(bills.find((bill:Row)=>bill.subscriptionId===legacy.student).amount,250000);
+  });
+  await t.test('admin student list filters ALL, ACTIVE and ARCHIVED with matching counts',async()=>{
+    for(const status of ['ABSENT','LEAVE','PRESENT'])
+      await request(`/admin/students?status=${status}`,admin.token,undefined,'GET',400);
+    await request('/admin/students?status=ALL',guardian.token,undefined,'GET',403);
+    const names=(page:Row)=>page.items.map((item:Row)=>item.studentName).sort();
+    const before=await request('/admin/students',admin.token);
+    assert.deepEqual(before.counts,{all:3,active:2,archived:0});
+    assert.deepEqual(names(before),['Abdullah','Ayesha','Existing child']);
+    for(const item of before.items) {assert.equal('hasAbsent' in item,false);assert.equal('hasLeave' in item,false);}
+    await request(`/admin/students/${secondStudent.id}/archive`,admin.token,undefined,'PATCH');
+    const all=await request('/admin/students?status=ALL',admin.token);
+    assert.deepEqual(all.counts,{all:2,active:1,archived:1});
+    assert.deepEqual(names(all),['Abdullah','Existing child']);assert.equal(all.total,2);
+    const active=await request('/admin/students?status=ACTIVE',admin.token);
+    assert.deepEqual(names(active),['Existing child']);assert.equal(active.total,1);
+    const archived=await request('/admin/students?status=ARCHIVED',admin.token);
+    assert.deepEqual(names(archived),['Ayesha']);assert.ok(archived.items[0].archivedAt);
+    assert.deepEqual(archived.counts,all.counts,'counts ignore the selected status');
+    assert.equal((await request('/admin/students?status=ARCHIVED&search=nobody',admin.token)).total,0);
+    assert.deepEqual(names(await request(`/admin/students?status=ALL&vehicleId=${legacy.vehicle}`,admin.token)),['Existing child']);
   });
 });

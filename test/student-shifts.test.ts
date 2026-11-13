@@ -111,22 +111,24 @@ test('student shifts, weekly travel and cross-table concurrency HTTP integration
     assert.deepEqual(results.map(result => result.status).sort(), [201, 409]);
     assert.equal((await db.get('SELECT count(*)::int count FROM student_profiles WHERE "guardianId"=$1', other.user.id)).count, 1);
   });
-  await t.test('attendance is independent for each enrollment and refuses institute/student off days atomically', async () => {
-    const record = (studentId: string, date: string) => ({ studentId, date, status: 'PRESENT' });
-    await request('/admin/attendance', admin.token, { entries: [record(morning.id, '2026-09-14'), record(day.id, '2026-09-14')] }, 'PUT');
-    let overview = await request('/management/overview', guardian.token);
-    assert.equal(overview.attendance.filter((entry: Row) => entry.date === '2026-09-14').length, 2);
-    await request('/admin/attendance', admin.token, { entries: [record(morning.id, '2026-09-15')] }, 'PUT', 400);
-    await request('/admin/attendance', admin.token, { entries: [record(day.id, '2026-09-15'), record(morning.id, '2026-09-15')] }, 'PUT', 400);
-    assert.equal((await db.all('SELECT id FROM attendance WHERE date=$1', '2026-09-15')).length, 0);
-    await request('/management/requests', guardian.token, { studentId: morning.id, category: 'ABSENCE', title: 'Off day', description: 'Should not count as absent', date: '2026-09-15' }, 'POST', 400);
+  await t.test('absence requests follow each enrollment calendar and refuse institute/student off days', async () => {
+    const absence = (studentId: string, date: string) => ({ studentId, category: 'ABSENCE', title: 'Absence', description: 'Away for the day', date });
+    // 2026-09-14 is a Monday (both enrollments travel); 2026-09-15 is a Tuesday (only the DAY enrollment travels).
+    const morningAbsence = await request('/management/requests', guardian.token, absence(morning.id, '2026-09-14'), 'POST', 201);
+    await request('/management/requests', guardian.token, absence(day.id, '2026-09-14'), 'POST', 201);
+    const offDay = await raw('/management/requests', guardian.token, absence(morning.id, '2026-09-15'), 'POST');
+    assert.equal(offDay.status, 400);
+    assert.equal(offDay.data.message, 'This student has no scheduled transport on the selected day');
+    await request('/management/requests', guardian.token, absence(day.id, '2026-09-15'), 'POST', 201);
     await request('/admin/settings', admin.token, { operatingDays: [0, 2, 3, 4, 6] }, 'PATCH');
-    await request('/admin/attendance', admin.token, { entries: [record(morning.id, '2026-09-21')] }, 'PUT', 400);
-    overview = await request('/management/overview', guardian.token);
+    await request('/management/requests', guardian.token, absence(morning.id, '2026-09-21'), 'POST', 400);
+    await request(`/admin/management-requests/${morningAbsence.id}/decision`, admin.token, { decision: 'APPROVED' }, 'PATCH');
+    assert.equal((await db.get('SELECT count(*)::int count FROM attendance')).count, 0, 'approving an absence records no attendance');
+    const overview = await request('/management/overview', guardian.token);
+    assert.equal('attendance' in overview, false);
     const weekday = new Date(`${overview.today}T12:00:00Z`).getUTCDay();
     for (const student of overview.students) assert.equal(student.scheduledToday, student.status === 'ACTIVE' && student.operatingDays.includes(weekday) && overview.settings.operatingDays.includes(weekday));
     assert.deepEqual(overview.todayStudents.map((s: Row) => s.id), overview.students.filter((s: Row) => s.scheduledToday).map((s: Row) => s.id));
-    assert.equal(overview.attendance.length, 2, 'calendar changes retain historical attendance');
     await request('/admin/settings', admin.token, { operatingDays: settings.operatingDays }, 'PATCH');
   });
   await t.test('overlaps warn, profile identities survive stopping, and bills distinguish each shift', async () => {
@@ -156,11 +158,9 @@ test('student shifts, weekly travel and cross-table concurrency HTTP integration
     await db.run(`INSERT INTO payment_submissions(id,"billId","guardianId",method,"recipientNumber","senderNumber","transactionId",amount,status,"createdAt") VALUES($1,$2,$3,'BKASH','01700000001','01700000002',$4,$5,'PENDING',$6)`, submissionId, morningBill.id, guardian.user.id, `pending-${submissionId}`, morningBill.amount, new Date().toISOString());
     await request(`/admin/students/${morning.id}/stop`, admin.token, { stopDate, finalMonthlyFee: morningBill.amount }, 'PATCH', 409);
     await db.run('DELETE FROM payment_submissions WHERE id=$1', submissionId);
-    const attendanceBeforeStop = (await db.get('SELECT count(*)::int count FROM attendance WHERE "studentId"=$1',day.id)).count;
     const stopped = await request(`/admin/students/${day.id}/stop`, admin.token, { stopDate, finalMonthlyFee: 100000, reason: 'Stopped after a few days' }, 'PATCH');
     assert.equal(stopped.settlement.billAction,'ADJUSTED');
     assert.equal(stopped.finalBill.amount,100000);
-    assert.equal((await db.get('SELECT count(*)::int count FROM attendance WHERE "studentId"=$1',day.id)).count,attendanceBeforeStop);
     const replacement = await apply({ studentId: morning.studentId, shiftId: 'DAY' });
     assert.equal(replacement.studentId, morning.studentId);
     assert.equal((await db.get('SELECT status FROM subscriptions WHERE id=$1', morning.id)).status, 'ACTIVE');
@@ -180,7 +180,6 @@ test('student shifts, weekly travel and cross-table concurrency HTTP integration
     await request(`/admin/requests/${pending.id}/decision`, admin.token, { decision: 'REJECTED', note: 'Archive test' }, 'PATCH');
     await request(`/admin/students/${morning.id}/archive`, guardian.token, undefined, 'PATCH', 403);
     const pendingStop = await request('/stop-requests', guardian.token, { subscriptionId: morning.id, reason: 'Archive requested' }, 'POST', 201);
-    const attendanceBefore = (await db.get('SELECT count(*)::int count FROM attendance WHERE "studentId"=$1', morning.id)).count;
     await request('/admin/bills/generate', admin.token, { month: new Date().toISOString().slice(0, 7) }, 'POST', 201);
     const billsBefore = (await db.get(`SELECT count(*)::int count FROM bills b JOIN subscriptions s ON s.id=b."subscriptionId" WHERE s."studentId"=$1`, morning.studentId)).count;
     const archived = await request(`/admin/students/${day.id}/archive`, admin.token, undefined, 'PATCH');
@@ -198,7 +197,6 @@ test('student shifts, weekly travel and cross-table concurrency HTTP integration
     assert.ok(archivedRows.filter((student: Row) => student.studentId === morning.studentId).every((student: Row) => student.archivedAt));
     await request('/admin/students/archived', guardian.token, undefined, 'GET', 403);
     assert.ok((await db.all('SELECT status FROM subscriptions WHERE "studentId"=$1', morning.studentId)).every((service: Row) => service.status === 'STOPPED'));
-    assert.equal((await db.get('SELECT count(*)::int count FROM attendance WHERE "studentId"=$1', morning.id)).count, attendanceBefore);
     assert.equal((await db.get(`SELECT count(*)::int count FROM bills b JOIN subscriptions s ON s.id=b."subscriptionId" WHERE s."studentId"=$1`, morning.studentId)).count, billsBefore);
     await request(`/admin/students/${morning.id}`, admin.token, { roll: '99' }, 'PATCH', 409);
     await enroll({ studentId: morning.studentId, shiftId: 'EVENING' }, 409);

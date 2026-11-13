@@ -16,7 +16,6 @@ import { Roles } from '../auth/auth.guard';
 import { AuthRequest } from '../auth/auth.types';
 import { DecisionDto } from '../payments/payments.dto';
 import {
-  AttendanceBatchDto,
   CreateBannerDto,
   CreateDriverDto,
   CreateLedgerDto,
@@ -94,12 +93,6 @@ export class ManagementController {
     @Body() input: UpdateDriverDto,
   ) {
     return this.service.saveDriver(req.user, input, id);
-  }
-  @Roles('ADMIN') @Put('admin/attendance') attendance(
-    @Req() req: AuthRequest,
-    @Body() input: AttendanceBatchDto,
-  ) {
-    return this.service.attendance(req.user, input);
   }
   @Roles('ADMIN') @Post('admin/maintenance') maintenance(
     @Req() req: AuthRequest,
